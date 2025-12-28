@@ -1,0 +1,78 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# --- VS Code ---
+.vscode/
+
+# --- OS / Windows ---
+Thumbs.db
+Thumbs.db:encryptable
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# --- Logs / data outputs (project-specific) ---
+# Sensor logs and captured CSV output files
+sensor_log_*.csv
+*.log
+
+# --- Database (SQLite) ---
+# Local runtime DB created by dashboard.py/check_db.py
+smart_home_data.db
+*.db
+*.sqlite
+*.sqlite3
+
+# SQLite sidecar files
+*.db-journal
+*.sqlite-journal
+*.sqlite3-journal
+*.db-wal
+*.sqlite-wal
+*.sqlite3-wal
+*.db-shm
+*.sqlite-shm
+*.sqlite3-shm
+
+# --- Arduino / PlatformIO (if used) ---
+# Arduino IDE build artifacts (commonly created in sketch folders)
+*.elf
+*.hex
+*.bin
+*.map
+
+# PlatformIO
+.pio/
+
+# Arduino IDE / editor backups
+*~
+*.bak
+
+# --- Secrets (keep credentials out of git) ---
+.env
+.env.*
