@@ -6,6 +6,20 @@ DB_NAME = 'smart_home_data.db'
 TABLE_NAME = 'sensor_data'  # Updated to match the new dashboard
 
 def inspect_database():
+    """Inspect the SQLite database used by the dashboard.
+
+    This utility script is meant for quick validation during development and
+    report preparation.
+
+    Output sections:
+        1) Table schema (via PRAGMA table_info)
+        2) Latest 10 rows (ordered by descending id)
+
+    Behavior:
+        - If the DB file does not exist, prints a helpful message and exits.
+        - If the table is missing or empty, prints a warning.
+        - Any operational errors are caught and printed to the console.
+    """
     # Check if file exists first
     if not os.path.exists(DB_NAME):
         print(f"❌ ERROR: Database file '{DB_NAME}' not found.")
@@ -24,12 +38,13 @@ def inspect_database():
     print("="*80)
 
     # --- PART 1: DATABASE DESIGN (Requirement for Report Section 7) ---
+    # Schema is derived directly from SQLite's metadata.
     print(f"\n[1] TABLE SCHEMA ({TABLE_NAME}):")
     print(f"{'ID':<5} {'Name':<15} {'Type':<10} {'NotNull'}")
     print("-" * 50)
     
     try:
-        # Get table info for the NEW table name 'sensor_data'
+        # Get table info for the table name configured in TABLE_NAME.
         c.execute(f"PRAGMA table_info({TABLE_NAME})")
         columns = c.fetchall()
         
@@ -44,6 +59,7 @@ def inspect_database():
         print(f"Error reading schema: {e}")
 
     # --- PART 2: LOGGED DATA (Requirement for Logging Standard) ---
+    # Fetch a small sample of recent rows for a sanity check.
     print("\n" + "="*80)
     print("[2] LOGGED DATA (Latest 10 readings):")
     # Updated header to match the 5 columns

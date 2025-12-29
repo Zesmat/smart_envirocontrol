@@ -4,6 +4,9 @@
 SoftwareSerial nodeA_Serial(2, 3); 
 
 void setup() {
+  // Node B acts as a gateway:
+  //   - USB Serial <-> Laptop (Python dashboard)
+  //   - SoftwareSerial <-> Node A (sensors + actuators)
   Serial.begin(9600);      // To Laptop USB
   nodeA_Serial.begin(9600); // To Node A
   
@@ -11,7 +14,7 @@ void setup() {
 }
 
 void loop() {
-// 1. UPLOAD: Forward Sensor Data (Node A -> Laptop)
+  // 1. UPLOAD: Forward Sensor Data (Node A -> Laptop)
   // We use Serial.write() to pass the raw data (including newlines) instantly
   if (nodeA_Serial.available()) {
     Serial.write(nodeA_Serial.read());

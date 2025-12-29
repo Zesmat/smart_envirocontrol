@@ -7,16 +7,21 @@
 #define LDR_PIN A0
 #define FAN_PIN 3      
 #define LIGHT_PIN 7    
-
+#define RELAY_ON  LOW  
+#define RELAY_OFF HIGH
 // Communication to Node B: RX=10, TX=11
 SoftwareSerial nodeB_Serial(10, 11); 
 
 DHT dht(DHTPIN, DHTTYPE);
 
-bool aiOverride = false;
-bool forceLightOn = false; 
+
+bool fanOverride = false;
+bool lightOverride = false; 
 
 void setup() {
+  // Initialize both serial channels:
+  //  - Serial: USB debugging to laptop
+  //  - nodeB_Serial: SoftwareSerial link to Node B gateway
   Serial.begin(9600);       // For laptop debugging
   nodeB_Serial.begin(9600); // For talking to Node B
   dht.begin();
@@ -25,6 +30,7 @@ void setup() {
   pinMode(LIGHT_PIN, OUTPUT);
   
   // Test Cycle: Turn everything ON for 2 seconds to check wiring
+  // This helps verify power, relays, and pin mapping before runtime logic.
   digitalWrite(LIGHT_PIN, HIGH); 
   analogWrite(FAN_PIN, 255);
   delay(2000);
@@ -45,25 +51,27 @@ void loop() {
     Serial.println("Failed to read from DHT sensor!");
     return;
   }
-// 2. LISTEN FOR COMMANDS (Updated for Lights)
+  // 2. LISTEN FOR COMMANDS (Fan + Lights)
+  // Commands arrive from Node B (which forwards from the Python dashboard).
   if (nodeB_Serial.available()) {
       char cmd = nodeB_Serial.read();
       
       if (cmd == 'P') { // Proactive Cooling
-        aiOverride = true;
+        fanOverride = true;
       } 
       else if (cmd == 'N') { // Normal Mode
-        aiOverride = false;
+        fanOverride = false;
       }
       else if (cmd == 'L') { // Light ON (Voice)
-        forceLightOn = true;
+        lightOverride = true;
       }
       else if (cmd == 'l') { // Light OFF (Voice) - lowercase 'L'
-        forceLightOn = false;
+        lightOverride = false;
       }
   }
-    // 3. ACTUATOR LOGIC
-  if (aiOverride) {
+  // 3. ACTUATOR LOGIC (FAN)
+  // If AI/dashboard predicts high temperature it can force fanOverride.
+  if (fanOverride) {
       // If AI says it will get hot, turn fan ON immediately
       analogWrite(FAN_PIN, 255); 
     } 
@@ -75,29 +83,38 @@ void loop() {
         analogWrite(FAN_PIN, 0); 
       }
     }
-// 4. ACTUATOR LOGIC - LIGHTS (New)
+  // 4. ACTUATOR LOGIC - LIGHTS
+  // Light control supports:
+  //   - Voice override (L / l)
+  //   - Auto mode based on LDR threshold
   // If voice says ON ('L'), turn on.
   // OR if it's dark (< 300) and voice didn't force it OFF, turn on.
-  if (forceLightOn) {
-      digitalWrite(LIGHT_PIN, HIGH);
+  bool shouldLightBeOn = false;
+  if (lightOverride) {
+        // CASE A: Voice said "Turn On" -> Force ON
+        shouldLightBeOn = true;
+    } else {
+        // CASE B: Voice said "Turn Off" (or nothing) -> Auto Sensor Mode
+        // Adjust '300' if needed. 
+        // < 300 Usually means Dark. > 600 Usually means Bright.
+        if (lightVal < 500) { 
+          shouldLightBeOn = true;
+        }
+    }
+  if (shouldLightBeOn) {
+      digitalWrite(LIGHT_PIN, RELAY_ON);
   } else {
-      // Normal Light Logic (Automatic Night Light)
-      // If voice command was 'l' (OFF), forceLightOn is false, 
-      // so it falls back to sensor.
-      if (lightVal > 500) { // Dark room
-         digitalWrite(LIGHT_PIN, HIGH);
-      } else {
-         digitalWrite(LIGHT_PIN, LOW);
-      }
+      digitalWrite(LIGHT_PIN, RELAY_OFF);
   }
-  // 4. TRANSMIT (Corrected to 3 values for Python Dashboard)
+  // 5. TRANSMIT SENSOR VALUES
+  // Format (CSV): temp,humidity,light
   nodeB_Serial.print(t); 
   nodeB_Serial.print(","); 
   nodeB_Serial.print(h); 
   nodeB_Serial.print(","); 
   nodeB_Serial.println(lightVal);
 
-  // 5. DEBUG (To your Node A Serial Monitor)
+  // 6. DEBUG (USB Serial Monitor)
   Serial.print("Data to Hub: ");
   Serial.print(t); Serial.print(","); 
   Serial.print(h); Serial.print(","); 
