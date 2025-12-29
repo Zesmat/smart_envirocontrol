@@ -14,6 +14,7 @@ SoftwareSerial nodeB_Serial(10, 11);
 DHT dht(DHTPIN, DHTTYPE);
 
 bool aiOverride = false;
+bool forceLightOn = false; 
 
 void setup() {
   Serial.begin(9600);       // For laptop debugging
@@ -44,18 +45,23 @@ void loop() {
     Serial.println("Failed to read from DHT sensor!");
     return;
   }
+// 2. LISTEN FOR COMMANDS (Updated for Lights)
   if (nodeB_Serial.available()) {
       char cmd = nodeB_Serial.read();
       
-      if (cmd == 'P') {
+      if (cmd == 'P') { // Proactive Cooling
         aiOverride = true;
-        Serial.println("Command Received: PROACTIVE COOLING (AI)");
       } 
-      else if (cmd == 'N') {
+      else if (cmd == 'N') { // Normal Mode
         aiOverride = false;
-        Serial.println("Command Received: Normal Mode");
       }
-    }
+      else if (cmd == 'L') { // Light ON (Voice)
+        forceLightOn = true;
+      }
+      else if (cmd == 'l') { // Light OFF (Voice) - lowercase 'L'
+        forceLightOn = false;
+      }
+  }
     // 3. ACTUATOR LOGIC
   if (aiOverride) {
       // If AI says it will get hot, turn fan ON immediately
@@ -69,12 +75,21 @@ void loop() {
         analogWrite(FAN_PIN, 0); 
       }
     }
-  if (lightVal > 600) { 
-    digitalWrite(LIGHT_PIN, HIGH); 
-  } else { 
-    digitalWrite(LIGHT_PIN, LOW); 
+// 4. ACTUATOR LOGIC - LIGHTS (New)
+  // If voice says ON ('L'), turn on.
+  // OR if it's dark (< 300) and voice didn't force it OFF, turn on.
+  if (forceLightOn) {
+      digitalWrite(LIGHT_PIN, HIGH);
+  } else {
+      // Normal Light Logic (Automatic Night Light)
+      // If voice command was 'l' (OFF), forceLightOn is false, 
+      // so it falls back to sensor.
+      if (lightVal > 500) { // Dark room
+         digitalWrite(LIGHT_PIN, HIGH);
+      } else {
+         digitalWrite(LIGHT_PIN, LOW);
+      }
   }
-
   // 4. TRANSMIT (Corrected to 3 values for Python Dashboard)
   nodeB_Serial.print(t); 
   nodeB_Serial.print(","); 

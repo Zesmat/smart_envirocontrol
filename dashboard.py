@@ -5,7 +5,7 @@ import time
 import sqlite3
 import numpy as np
 import csv 
-import speech_recognition as sr # <--- NEW IMPORT
+import speech_recognition as sr 
 from sklearn.svm import SVR
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -14,26 +14,43 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 # --- SYSTEM CONFIGURATION ---
-SERIAL_PORT = 'COM5'  # <--- CHECK THIS
+SERIAL_PORT = 'COM7'  # <--- CHECK THIS
 BAUD_RATE = 9600
 DB_NAME = 'smart_home_data.db'
-AI_EMERGENCY_TEMP_C = 27.0  # Fixed AI trigger temperature (no slider)
+AI_THRESHOLD = 27.0   # Fixed Limit
 
 # --- THEME ---
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue") 
 
 class SmartHomeApp(ctk.CTk):
-    def __init__(self):
-        """Initialize the main application window and runtime state.
+    """Smart EnviroControl dashboard application.
 
-        Sets up the CustomTkinter window, initializes voice recognition,
-        creates the sidebar + main dashboard UI, allocates in-memory series
-        buffers for plotting, and starts the background serial thread.
+    High-level responsibilities:
+        - Build the CustomTkinter UI (sidebar + main area with graphs).
+        - Manage background tasks:
+            - Serial loop: read sensors, log to SQLite, send control bytes.
+            - Voice loop: wake-word detection + command recognition.
+        - Run a simple AI forecast (SVR) used to decide proactive cooling.
+
+    Threading model:
+        - GUI runs on the main thread (`mainloop`).
+        - Serial + voice logic run in daemon threads.
+        - GUI updates from worker threads are scheduled via `self.after(...)`.
+    """
+
+    def __init__(self):
+        """Initialize runtime state, build UI, and start background threads.
+
+        Initializes:
+            - Window configuration (size, grid weights).
+            - SpeechRecognition recognizer and voice state machine flags.
+            - UI widgets for sidebar, cards, and plots.
+            - In-memory data buffers used for plotting.
 
         Side effects:
-            - Spawns a daemon thread running `serial_loop()`.
-            - Initializes GUI widgets and plot canvases.
+            - Starts the serial background thread.
+            - Starts the unified voice background thread.
         """
         super().__init__()
 
@@ -44,38 +61,51 @@ class SmartHomeApp(ctk.CTk):
         self.grid_rowconfigure(0, weight=1)
 
         # Voice & Control State
+        # Speech recognizer instance used for both wake word and commands.
         self.recognizer = sr.Recognizer()
-        self.ai_enabled = True # Default: AI is in charge
+        self.ai_enabled = True 
         self.manual_override_status = "None"
+        
+        # Audio State Machine Flags
+        # Voice state machine: "WAKE" listens for the wake word; "CMD" listens for a command.
+        self.voice_mode = "WAKE"  # Options: "WAKE" (Listening for Jarvis) or "CMD" (Listening for Command)
+        # Global run flag used by background loops.
+        self.running = True 
 
         # UI Setup
+        # Build UI widgets before background threads start updating them.
         self.setup_sidebar()
         self.setup_main_area()
 
         # Data Lists
+        # Plot data buffers; updated in `update_dashboard()`.
         self.x_data = []    
         self.y_temp = []    
         self.y_hum = []     
         self.y_light = []   
-        self.running = True 
-
-        # Start Thread
+        
+        # Start Threads
+        # Serial loop: reads sensor lines, logs to DB, controls actuators.
         threading.Thread(target=self.serial_loop, daemon=True).start()
+        
+        # Start the UNIFIED Voice Thread (Solves the Crash)
+        # Unified voice loop: keeps microphone stream in a single thread to avoid conflicts.
+        threading.Thread(target=self.unified_voice_loop, daemon=True).start()
 
     def setup_sidebar(self):
-        """Build the left sidebar UI.
+        """Create the left sidebar UI.
 
-        Creates and places:
-            - App title/logo label
+        Adds:
+            - App title label
             - Connection status label
-            - Control mode status label
-            - Voice command button
+            - Current control-mode label
+            - Voice status/trigger button and hint label
             - Export button
-            - Fixed AI trigger temperature label (uses `AI_EMERGENCY_TEMP_C`)
+            - Fixed AI trigger threshold label
 
         Notes:
-            The AI trigger temperature is intentionally fixed (no slider) per
-            project requirement.
+            The voice button is primarily a visual indicator but also provides
+            a manual trigger via `force_wake()`.
         """
         self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
@@ -92,27 +122,29 @@ class SmartHomeApp(ctk.CTk):
         self.mode_label = ctk.CTkLabel(self.sidebar, text="AI AUTOMATIC", text_color="#2ECC71", font=ctk.CTkFont(size=14, weight="bold"))
         self.mode_label.grid(row=3, column=0, padx=20, pady=5)
 
-        # --- NEW: VOICE BUTTON ---
-        self.btn_voice = ctk.CTkButton(self.sidebar, text="🎙️ Voice Command", command=self.listen_to_voice, fg_color="#8E44AD", hover_color="#9B59B6")
+        # Voice Button (Visual Indicator Only)
+        self.btn_voice = ctk.CTkButton(self.sidebar, text="🎙️ Initializing...", command=self.force_wake, fg_color="#5B2C6F", hover_color="#9B59B6")
         self.btn_voice.grid(row=4, column=0, padx=20, pady=(30, 10))
+        
+        # Instructions Label
+        self.lbl_voice_hint = ctk.CTkLabel(self.sidebar, text="Say 'Jarvis' to wake", font=ctk.CTkFont(size=10), text_color="gray")
+        self.lbl_voice_hint.grid(row=5, column=0)
 
         # Export Button
-        self.btn_export = ctk.CTkButton(self.sidebar, text="💾 Export Data", command=self.export_csv, fg_color="#27AE60")
-        self.btn_export.grid(row=5, column=0, padx=20, pady=10)
+        ctk.CTkButton(self.sidebar, text="💾 Export Data", command=self.export_csv, fg_color="#27AE60").grid(row=6, column=0, padx=20, pady=(30, 10))
 
-        # Fixed AI trigger temperature (no slider)
-        ctk.CTkLabel(self.sidebar, text="AI Trigger Temp:", anchor="w").grid(row=6, column=0, padx=20, pady=(20, 0))
-        ctk.CTkLabel(self.sidebar, text=f"{AI_EMERGENCY_TEMP_C:.1f} °C (fixed)", text_color="#3498DB").grid(row=7, column=0, padx=20, pady=(5, 10))
+        # Threshold Display
+        ctk.CTkLabel(self.sidebar, text=f"AI Trigger Fixed:\n> {AI_THRESHOLD}°C", font=("Arial", 12, "bold"), text_color="gray").grid(row=7, column=0, padx=20, pady=(40, 0))
 
     def setup_main_area(self):
-        """Build the main dashboard area (cards + tabbed plots).
+        """Create the main dashboard area (KPI cards + tabbed plots).
 
-        Creates:
-            - Four KPI cards (temperature, humidity, light, AI forecast)
-            - A tab view with three matplotlib plots (temp/humidity/light)
+        Layout:
+            - Top row: four KPI cards (temperature, humidity, light, AI forecast).
+            - Bottom: tab view hosting three matplotlib graphs.
 
         Side effects:
-            - Initializes matplotlib axes/canvases for later redraw.
+            Initializes matplotlib axes and canvases for later updates.
         """
         self.main_frame = ctk.CTkFrame(self, corner_radius=10, fg_color="transparent")
         self.main_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
@@ -133,17 +165,18 @@ class SmartHomeApp(ctk.CTk):
         self.ax_light, self.canvas_light = self.create_graph(self.tab_view.add("Light"), "Light Trend", "#F1C40F")
 
     def create_card(self, col, title, value, color):
-        """Create a KPI card for the top row.
+        """Create a KPI card and return the label used to update its value.
 
         Args:
-            col: Grid column index within the main_frame.
-            title: Card title string.
-            value: Initial value text displayed.
-            color: Text color for the value label.
+            col: Grid column index for the card.
+            title: Card title text.
+            value: Initial value text.
+            color: Value label color.
 
         Returns:
-            The value label widget, so the caller can update it later.
+            The `CTkLabel` displaying the changing numeric value.
         """
+        # A card is a frame with a small title label and a large value label.
         frame = ctk.CTkFrame(self.main_frame, fg_color="#2b2b2b", corner_radius=15)
         frame.grid(row=0, column=col, padx=10, pady=10, sticky="ew")
         ctk.CTkLabel(frame, text=title, font=("Roboto Medium", 14), text_color="#aaaaaa").pack(pady=(15,5))
@@ -152,16 +185,18 @@ class SmartHomeApp(ctk.CTk):
         return lbl
 
     def create_graph(self, parent, title, color):
-        """Create a matplotlib line plot embedded into a Tk container.
+        """Create a matplotlib plot embedded into a CustomTkinter container.
 
         Args:
-            parent: The tab/frame to host the plot canvas.
-            title: Plot title (currently not shown, kept for extensibility).
-            color: Line color for the series.
+            parent: Tab/frame to host the graph.
+            title: Plot title (kept for readability/extensibility).
+            color: Line color for the plot.
 
         Returns:
-            (ax, canvas) tuple for future updates.
+            `(ax, canvas)` where `ax` is the matplotlib axes and `canvas` is
+            the TkAgg canvas wrapper.
         """
+        # Configure a dark-themed figure/axes and embed it in the UI.
         fig = Figure(figsize=(5, 3), dpi=100)
         fig.patch.set_facecolor('#242424')
         ax = fig.add_subplot(111)
@@ -173,70 +208,167 @@ class SmartHomeApp(ctk.CTk):
         canvas.get_tk_widget().pack(fill="both", expand=True)
         return ax, canvas
 
-    # --- VOICE ASSISTANT LOGIC ---
-    def listen_to_voice(self):
-        """Start a background voice-recognition session.
+    # --- THE MAGIC FIX: SINGLE THREAD FOR EVERYTHING ---
+    def unified_voice_loop(self):
+        """
+        One thread to rule them all. No conflicts.
+        Switches between 'WAKE' mode and 'CMD' mode seamlessly.
 
-        Runs microphone capture + speech-to-text in a daemon thread to avoid
-        blocking the GUI event loop.
+        Why single-threaded mic handling:
+            SpeechRecognition microphone streams can conflict when multiple
+            threads try to open/listen simultaneously. Keeping a single thread
+            owning the stream avoids crashes and device-lock issues.
 
-        Recognized commands (simple keyword matching):
-            - "fan on": disables AI mode and forces fan ON
-            - "auto" or "reset": re-enables AI automatic control
+        State machine:
+            - WAKE: short listens (responsive loop) looking for "jarvis".
+            - CMD: longer listen to capture the full command.
+
+        UI behavior:
+            Updates the voice button text/color and hint label to reflect state.
+        """
+        time.sleep(3) # Let GUI load
+        self.btn_voice.configure(text="🎙️ Waiting for 'Jarvis'...", fg_color="#5B2C6F")
+        
+        while self.running:
+            try:
+                # Device 1 = Laptop Mic. (Change index if needed)
+                with sr.Microphone(device_index=1) as source:
+                    
+                    # 1. ADJUST SENSITIVITY ONCE
+                    self.recognizer.energy_threshold = 300
+                    self.recognizer.pause_threshold = 0.8 
+                    
+                    # 2. START LISTENING LOOP (Keep Stream Open)
+                    while self.running:
+                        try:
+                            # --- MODE 1: WAITING FOR JARVIS ---
+                            if self.voice_mode == "WAKE":
+                                # Idle mode: keep loop responsive via short timeouts.
+                                self.btn_voice.configure(text="🎙️ Waiting for 'Jarvis'...", fg_color="#5B2C6F")
+                                self.lbl_voice_hint.configure(text="Say 'Jarvis' to wake", text_color="gray")
+                                
+                                # Short timeout (2s) to keep loop responsive
+                                audio = self.recognizer.listen(source, timeout=2, phrase_time_limit=2)
+                                phrase = self.recognizer.recognize_google(audio).lower()
+                                
+                                if "jarvis" in phrase:
+                                    print("✅ JARVIS HEARD!")
+                                    self.speak("Yes?") # Optional: Needs TTS
+                                    self.voice_mode = "CMD" # SWITCH MODES
+                                    
+                            # --- MODE 2: LISTENING FOR COMMAND ---
+                            elif self.voice_mode == "CMD":
+                                # Active mode: allow more time to speak a full command.
+                                self.btn_voice.configure(text="🔴 LISTENING NOW...", fg_color="#E74C3C")
+                                self.lbl_voice_hint.configure(text="Say: 'Turn on fan' or 'Auto'", text_color="#E74C3C")
+                                
+                                # Longer timeout (5s) for full command
+                                audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=5)
+                                self.btn_voice.configure(text="Processing...", fg_color="#F39C12")
+                                
+                                command = self.recognizer.recognize_google(audio).lower()
+                                print(f"Command: {command}")
+                                
+                                # --- EXECUTE COMMAND ---
+                                if "on" in command and "fan" in command:
+                                    # Manual override: fan forced ON (proactive cooling).
+                                    self.ai_enabled = False
+                                    self.manual_override_status = "ON"
+                                    self.mode_label.configure(text="VOICE OVERRIDE", text_color="#F39C12")
+                                    self.speak("Fan ON.")
+                                    self.btn_voice.configure(text="✅ Fan ON", fg_color="#27AE60")
+                                    
+                                elif "off" in command and "fan" in command:
+                                    # Return to AI automatic mode.
+                                    self.ai_enabled = True
+                                    self.manual_override_status = "None"
+                                    self.mode_label.configure(text="AI AUTOMATIC", text_color="#2ECC71")
+                                    self.speak("Fan OFF (Auto).")
+                                    self.btn_voice.configure(text="✅ Fan OFF", fg_color="#27AE60")
+
+                                elif "auto" in command or "reset" in command:
+                                    # Explicit reset to AI automatic mode.
+                                    self.ai_enabled = True
+                                    self.manual_override_status = "None"
+                                    self.mode_label.configure(text="AI AUTOMATIC", text_color="#2ECC71")
+                                    self.speak("Auto Mode.")
+                                    self.btn_voice.configure(text="✅ Auto Mode", fg_color="#27AE60")
+                                elif "light" in command:
+                                    # Light control bytes are sent over serial.
+                                    if "on" in command:
+                                        self.ser.write(b'L') # Send 'L' to Arduino
+                                        self.speak("Lights turned ON.")
+                                        self.btn_voice.configure(text="✅ Lights ON", fg_color="#F1C40F") # Yellow color
+                                    elif "off" in command:
+                                        self.ser.write(b'l') # Send lowercase 'l' to Arduino
+                                        self.speak("Lights turned OFF.")
+                                        self.btn_voice.configure(text="✅ Lights OFF", fg_color="#27AE60")
+                                
+                                else:
+                                    # Fallback when speech is understood but doesn't match supported commands.
+                                    self.btn_voice.configure(text="❓ Unknown", fg_color="gray")
+
+                                # Go back to sleep after command
+                                time.sleep(2)
+                                self.voice_mode = "WAKE"
+
+                        except sr.WaitTimeoutError:
+                            # This is normal. Just loop back.
+                            if self.voice_mode == "CMD":
+                                # If we timed out waiting for a command, go back to sleep
+                                self.voice_mode = "WAKE"
+                                self.btn_voice.configure(text="❌ Timed Out", fg_color="gray")
+                                time.sleep(1)
+                        
+                        except sr.UnknownValueError:
+                            # Heard noise but no words. Ignore.
+                            pass
+                        
+                        except Exception as e:
+                            print(f"Inner Loop Error: {e}")
+                            # If stream breaks, break inner loop to re-open mic
+                            break 
+                            
+            except Exception as e:
+                print(f"Mic Connection Error: {e}")
+                self.btn_voice.configure(text="❌ Mic Error", fg_color="red")
+                time.sleep(3) # Wait before retrying
+
+    def force_wake(self):
+        """Manually switch the voice loop into command-listening mode.
+
+        Intended to be triggered by the sidebar voice button.
 
         Side effects:
-            - Updates UI button text/color while listening.
-            - Modifies `self.ai_enabled` and `self.manual_override_status`.
+            Sets `self.voice_mode` to "CMD" so the unified voice loop will
+            capture a full command on its next iteration.
         """
-        def _listen():
-            self.btn_voice.configure(text="Listening...", fg_color="red")
-            try:
-                with sr.Microphone() as source:
-                    self.recognizer.adjust_for_ambient_noise(source)
-                    audio = self.recognizer.listen(source, timeout=3)
-                    command = self.recognizer.recognize_google(audio).lower()
-                    print(f"Voice Heard: {command}")
-                    
-                    if "fan" in command and "on" in command:
-                        self.ai_enabled = False
-                        self.manual_override_status = "ON"
-                        self.mode_label.configure(text="VOICE OVERRIDE", text_color="#F39C12")
-                        self.speak("Fan turned on.")
-                    
-                    elif "auto" in command or "reset" in command:
-                        self.ai_enabled = True
-                        self.manual_override_status = "None"
-                        self.mode_label.configure(text="AI AUTOMATIC", text_color="#2ECC71")
-                        self.speak("AI mode engaged.")
-
-            except Exception as e:
-                print(f"Voice Error: {e}")
-            
-            self.btn_voice.configure(text="🎙️ Voice Command", fg_color="#8E44AD")
-
-        threading.Thread(target=_listen, daemon=True).start()
+        self.voice_mode = "CMD"
 
     def speak(self, text):
-        """Output assistant speech.
+        """Provide assistant feedback output.
 
         Currently implemented as a console print placeholder.
 
         Args:
-            text: Text to 'speak'.
+            text: Message to output.
         """
-        # Placeholder for TTS if you add pyttsx3 later
         print(f"JARVIS: {text}")
 
     def export_csv(self):
-        """Export all rows from the SQLite sensor table to a CSV file.
+        """Export all stored sensor readings to a timestamped CSV file.
 
-        Writes a CSV file named like `sensor_log_HHMMSS.csv` in the current
-        working directory.
+        Reads all rows from SQLite table `sensor_data` and writes them to a file
+        in the current working directory.
 
         Side effects:
-            - Reads from SQLite `sensor_data`.
-            - Writes a CSV file.
-            - Updates the export button UI on success.
+            - Opens the SQLite database configured by `DB_NAME`.
+            - Writes a CSV file named `sensor_log_HHMMSS.csv`.
+            - Updates the export button text/color on success.
+
+        Error handling:
+            Uses a broad `try/except` to avoid crashing the UI if the database
+            is missing/locked; failures are silently ignored.
         """
         try:
             conn = sqlite3.connect(DB_NAME)
@@ -249,54 +381,73 @@ class SmartHomeApp(ctk.CTk):
         except: pass
 
     def run_ai_prediction(self):
-        """Train a lightweight SVR model and forecast a future temperature.
+        """Compute a temperature forecast using an SVR model.
 
-        Pulls the latest 60 temperature samples from SQLite and fits a simple
-        linear-kernel SVR pipeline (with standardization). Returns a formatted
-        string containing the predicted temperature.
+        Steps:
+            - Pull the most recent temperature samples from SQLite.
+            - Fit a simple SVR regression pipeline (StandardScaler + linear SVR).
+            - Predict a future point (offset by 60 steps).
 
         Returns:
-            A string like "28.3 °C", or "Gathering..." when insufficient data,
-            or "Error" on failure.
+            - "Gathering..." if not enough data exists to train.
+            - "Error" if DB/model operations fail.
+            - Otherwise a formatted string like "28.4 °C".
+
+        Notes:
+            This method is called from the serial background thread.
         """
         try:
             conn = sqlite3.connect(DB_NAME)
             cursor = conn.cursor()
-            cursor.execute("SELECT temp FROM sensor_data ORDER BY id DESC LIMIT 60")
+            cursor.execute("SELECT temp, humid FROM sensor_data ORDER BY id DESC LIMIT 60")
             data = cursor.fetchall()
             conn.close()
+
             if len(data) < 10: return "Gathering..."
+            # Optional/experimental: compute heat index list (not currently used in model training).
+            heat_indices = []
+            for t, h in data:
+                hi = t + 0.55 * (1 - (h/100)) * (t - 14.4)
+                heat_indices.append(hi)
+            # Prepare supervised training arrays.
             y = np.array([row[0] for row in data][::-1]).reshape(-1, 1) 
             x = np.array(range(len(y))).reshape(-1, 1)
+            
             model = make_pipeline(StandardScaler(), SVR(kernel='linear', C=1.0, epsilon=0.1))
             model.fit(x, y.ravel())
             return f"{model.predict([[len(y)+60]])[0]:.1f} °C"
         except: return "Error"
 
     def serial_loop(self):
-        """Background loop: read serial sensor data, persist, predict, control.
+        """Background loop: read serial sensor values, store, forecast, control.
 
         Responsibilities:
-            - Ensure SQLite table exists.
-            - Open the configured serial port and keep reading CSV lines.
-            - Insert each reading into SQLite.
-            - Run AI forecast and decide whether to send control bytes.
-            - Schedule GUI updates via `self.after()`.
+            - Ensure `sensor_data` table exists in SQLite.
+            - Connect to serial port (`SERIAL_PORT`, `BAUD_RATE`).
+            - Parse incoming CSV lines: `temp,humid,light`.
+            - Insert readings into the database.
+            - Run AI forecast and send control bytes to Arduino:
+                - `P` = proactive cooling
+                - `N` = normal
+            - Trigger UI updates via `self.after(...)`.
 
         Threading:
-            Runs on a daemon thread started from `__init__()`.
+            Runs as a daemon thread started from `__init__()`.
         """
+        # Ensure the database schema exists.
         conn = sqlite3.connect(DB_NAME)
         conn.execute('CREATE TABLE IF NOT EXISTS sensor_data (id INTEGER PRIMARY KEY, timestamp DATETIME, temp REAL, humid REAL, light INTEGER)')
         conn.close()
 
         try:
+            # Connect to the serial gateway.
             self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
             time.sleep(2) 
             self.status_label.configure(text="● SYSTEM ONLINE", text_color="#2ECC71")
         except: return
 
         while self.running:
+            # Only read when data is available.
             if self.ser.in_waiting:
                 try:
                     line = self.ser.readline().decode().strip()
@@ -304,81 +455,89 @@ class SmartHomeApp(ctk.CTk):
                     if len(parts) == 3:
                         t, h, l = parts
                         ts = datetime.now().strftime('%H:%M:%S')
+                        # Store the new sample.
                         conn = sqlite3.connect(DB_NAME)
                         conn.execute("INSERT INTO sensor_data (timestamp, temp, humid, light) VALUES (?,?,?,?)", (ts, t, h, l))
                         conn.commit()
                         conn.close()
 
+                        # Run AI forecast.
                         ai_res = self.run_ai_prediction()
 
-                        # --- CONTROL LOGIC (The Smart Brain) ---
                         if self.ai_enabled:
-                            # 1. AI MODE
                             try:
                                 pred = float(ai_res.split(' ')[0])
-                                thresh = AI_EMERGENCY_TEMP_C
-                                if pred > thresh:
-                                    self.ser.write(b'P') # Proactive Cool
+                                if pred > AI_THRESHOLD:
+                                    # Proactive cooling command.
+                                    self.ser.write(b'P')
                                 else:
-                                    self.ser.write(b'N') # Normal
+                                    # Normal mode command.
+                                    self.ser.write(b'N')
                             except: pass
                         else:
-                            # 2. VOICE OVERRIDE MODE
                             if self.manual_override_status == "ON":
-                                self.ser.write(b'P') # Force ON
+                                # Force proactive cooling while in manual override.
+                                self.ser.write(b'P') 
                         
-                        # Update GUI
+                        # Schedule a UI update on the main thread.
                         self.after(0, self.update_dashboard, t, h, l, ai_res)
                 except: pass
 
     def update_dashboard(self, t, h, l, ai):
-        """Update KPI cards and append points to plot series.
+        """Update KPI cards, append to buffers, and refresh plots.
 
         Args:
             t: Temperature value (string convertible to float).
             h: Humidity value (string convertible to float).
             l: Light level value (string convertible to int).
-            ai: AI forecast string (already formatted).
+            ai: AI forecast display string.
 
         Side effects:
             - Updates the four KPI labels.
-            - Appends to time-series buffers and trims to last 60 samples.
-            - Triggers redraw of all three graphs.
+            - Appends to plot data buffers.
+            - Trims buffers to a max history length.
+            - Redraws all three plots.
         """
+        # Update KPI card text.
         self.card_temp.configure(text=f"{t} °C")
         self.card_hum.configure(text=f"{h} %")
         self.card_light.configure(text=f"{l}")
         self.card_ai.configure(text=ai)
         
+        # Append new point into graph buffers.
         self.x_data.append(datetime.now().strftime('%H:%M:%S'))
         self.y_temp.append(float(t))
         self.y_hum.append(float(h))
         self.y_light.append(int(l))
         
+        # Keep only the latest 60 points for performance and readability.
         if len(self.x_data) > 60:
             self.x_data.pop(0); self.y_temp.pop(0); self.y_hum.pop(0); self.y_light.pop(0)
 
+        # Redraw each plot.
         self.update_single_graph(self.ax_temp, self.canvas_temp, self.y_temp, '#FF5733')
         self.update_single_graph(self.ax_hum, self.canvas_hum, self.y_hum, '#3498DB')
         self.update_single_graph(self.ax_light, self.canvas_light, self.y_light, '#F1C40F')
 
     def update_single_graph(self, ax, canvas, y, c):
-        """Redraw a single matplotlib axes with the latest buffered values.
+        """Redraw one matplotlib graph using the latest buffered values.
 
         Args:
-            ax: The matplotlib axes to draw into.
-            canvas: The TkAgg canvas wrapper to refresh.
-            y: The y-series values list.
-            c: Line color string.
+            ax: Matplotlib Axes to clear and redraw.
+            canvas: TkAgg canvas wrapper to refresh.
+            y: Y-series values list.
+            c: Line color.
 
         Notes:
-            Uses `self.x_data` for x-axis labels and decimates tick labels
-            to avoid clutter.
+            X-axis uses the index of `self.x_data` and shows timestamps.
+            Tick labels are decimated to reduce clutter.
         """
+        # Reset axes and plot current window.
         ax.clear(); ax.set_facecolor('#242424'); ax.grid(True, linestyle='--', linewidth=0.5)
         ax.plot(range(len(self.x_data)), y, color=c, linewidth=2)
         step = 10
         if len(self.x_data) > step:
+            # Decimate x tick labels for readability.
             idx = list(range(0, len(self.x_data), step))
             ax.set_xticks(idx); ax.set_xticklabels([self.x_data[i] for i in idx], rotation=30, ha='right', color='white')
         else:
