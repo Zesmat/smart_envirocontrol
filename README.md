@@ -4,7 +4,7 @@ A small “smart environment control” system:
 
 - **Node A (sensor + actuators)** reads temperature/humidity (DHT11) + LDR light, controls a fan + a light, and sends sensor data over serial.
 - **Node B (gateway)** bridges Node A <-> Laptop over USB serial.
-- **Python Dashboard** (`dashboard.py`) shows live graphs, stores readings in SQLite, and runs a simple SVR model to forecast temperature and proactively command cooling.
+- **Python Dashboard** (`dashboard.py`) shows live graphs, stores readings in SQLite, runs a simple SVR model to forecast a **“feels like”** temperature (heat index), and supports **voice commands (“Jarvis”)** to control fan/lights and request system status.
 
 ---
 
@@ -39,6 +39,8 @@ The dashboard sends a **single byte command** back over serial:
 
 - `P` = **Proactive cooling ON** (AI override)
 - `N` = **Normal mode** (Node A uses local threshold logic)
+- `L` = **Lights ON** (voice override)
+- `l` = **Lights OFF** (voice override)
 
 Node B forwards the byte to Node A.
 
@@ -127,6 +129,13 @@ Notes:
 - `sqlite3` is part of Python’s standard library (no install needed).
 - If `scikit-learn` install fails on your machine, upgrade pip first (above) and ensure you’re on a supported Python version.
 - Voice commands in `dashboard.py` require `SpeechRecognition` and an audio backend (`PyAudio` is included in `requirements.txt`).
+- The dashboard also uses `pyttsx3` for offline text-to-speech (TTS). If it is not installed in your environment, install it with:
+
+```powershell
+python -m pip install pyttsx3
+```
+
+Voice recognition uses Google Speech-to-Text (via SpeechRecognition) and typically requires an internet connection.
 
 ---
 
@@ -136,13 +145,22 @@ Notes:
 2. Find the COM port in Windows Device Manager (Ports (COM & LPT)).
 3. Open `dashboard.py` and set:
 
-- `SERIAL_PORT = 'COM5'` (change to your actual port)
+- `SERIAL_PORT = 'COM7'` (change to your actual port)
 
 4. Run:
 
 ```powershell
 python dashboard.py
 ```
+
+### Voice commands
+The dashboard continuously listens for the wake word **“Jarvis”**.
+
+After it wakes, supported commands include:
+- Fan: “turn on fan”, “turn off fan”, “auto” / “reset”
+- Lights: “lights on”, “lights off”
+- Info: “status” / “report”, “why” / “reason”
+- Safety: “shut down”, “goodbye”, “leave”
 
 What you should see:
 - Status in the sidebar should turn to **SYSTEM ONLINE** if serial connects.
