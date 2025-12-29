@@ -1,0 +1,7 @@
+customtkinter==5.2.2
+pyserial==3.5
+numpy==2.4.0
+matplotlib==3.10.8
+scikit-learn==1.8.0
+SpeechRecognition==3.14.4
+PyAudio==0.2.14

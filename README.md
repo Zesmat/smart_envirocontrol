@@ -120,12 +120,13 @@ py -m venv .venv
 
 ```powershell
 python -m pip install --upgrade pip
-python -m pip install customtkinter pyserial numpy matplotlib scikit-learn
+python -m pip install -r requirements.txt
 ```
 
 Notes:
 - `sqlite3` is part of Python’s standard library (no install needed).
 - If `scikit-learn` install fails on your machine, upgrade pip first (above) and ensure you’re on a supported Python version.
+- Voice commands in `dashboard.py` require `SpeechRecognition` and an audio backend (`PyAudio` is included in `requirements.txt`).
 
 ---
 
