@@ -37,7 +37,7 @@ def inspect_database():
     print(f"📂 DATABASE INSPECTION: {DB_NAME}")
     print("="*80)
 
-    # --- PART 1: DATABASE DESIGN (Requirement for Report Section 7) ---
+    # --- PART 1: DATABASE DESIGN ---
     # Schema is derived directly from SQLite's metadata.
     print(f"\n[1] TABLE SCHEMA ({TABLE_NAME}):")
     print(f"{'ID':<5} {'Name':<15} {'Type':<10} {'NotNull'}")
