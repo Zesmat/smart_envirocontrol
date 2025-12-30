@@ -12,8 +12,8 @@ A small “smart environment control” system:
 
 - `dashboard.py` — Desktop UI dashboard (CustomTkinter + Matplotlib) with logging + AI control.
 - `check_db.py` — Utility to inspect the SQLite database schema and latest readings.
-- `sketchnodeA.ino` — Arduino sketch for Node A (sensors + fan/light control).
-- `sketchnodeB.ino` — Arduino sketch for Node B (serial gateway).
+- `arduino/sketchnodeA/sketchnodeA.ino` — Arduino sketch for Node A (sensors + fan/light control).
+- `arduino/sketchnodeB/sketchnodeB.ino` — Arduino sketch for Node B (serial gateway).
 
 ---
 
@@ -129,13 +129,9 @@ Notes:
 - `sqlite3` is part of Python’s standard library (no install needed).
 - If `scikit-learn` install fails on your machine, upgrade pip first (above) and ensure you’re on a supported Python version.
 - Voice commands in `dashboard.py` require `SpeechRecognition` and an audio backend (`PyAudio` is included in `requirements.txt`).
-- The dashboard also uses `pyttsx3` for offline text-to-speech (TTS). If it is not installed in your environment, install it with:
-
-```powershell
-python -m pip install pyttsx3
-```
-
-Voice recognition uses Google Speech-to-Text (via SpeechRecognition) and typically requires an internet connection.
+- The dashboard uses `edge-tts` (neural TTS) and `pygame` for audio playback.
+  - On first run, the app may generate and store cached MP3 files under `cache/` for instant responses.
+  - Both Speech-to-Text (Google via SpeechRecognition) and Edge TTS typically require an internet connection.
 
 ---
 
@@ -157,6 +153,7 @@ python dashboard.py
 The dashboard continuously listens for the wake word **“Jarvis”**.
 
 After it wakes, supported commands include:
+- Chat: “hello”, “thank you” / “thanks”, “who are you”
 - Fan: “turn on fan”, “turn off fan”, “auto” / “reset”
 - Lights: “lights on”, “lights off”
 - Info: “status” / “report”, “why” / “reason”
@@ -173,7 +170,7 @@ What you should see:
 
 In the dashboard, click **Export Data (CSV)**.
 
-- Output file name: `sensor_log_YYYYMMDD_HHMMSS.csv`
+- Output file name: `sensor_log_HHMMSS.csv`
 - Columns: `ID, Timestamp, Temp, Humid, Light`
 
 ---

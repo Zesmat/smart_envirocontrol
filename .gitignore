@@ -41,6 +41,9 @@ $RECYCLE.BIN/
 sensor_log_*.csv
 *.log
 
+# --- Project cache ---
+cache/
+
 # --- Database (SQLite) ---
 # Local runtime DB created by dashboard.py/check_db.py
 smart_home_data.db

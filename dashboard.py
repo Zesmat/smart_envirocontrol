@@ -6,7 +6,11 @@ import sqlite3
 import numpy as np
 import csv 
 import speech_recognition as sr 
-import pyttsx3 
+import pygame
+import asyncio
+import edge_tts
+import os
+import random 
 from sklearn.svm import SVR
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -20,32 +24,97 @@ BAUD_RATE = 9600
 DB_NAME = 'smart_home_data.db'
 AI_THRESHOLD = 27.0   
 
-# --- MODERN THEME COLORS ---
-COLOR_BG = "#0F172A"       # Deep Slate Background
-COLOR_SIDEBAR = "#1E293B"  # Lighter Slate Sidebar
-COLOR_CARD = "#334155"     # Card Surface
-COLOR_PRIMARY = "#3B82F6"  # Bright Blue
-COLOR_SUCCESS = "#10B981"  # Emerald Green
-COLOR_WARNING = "#F59E0B"  # Amber/Orange
-COLOR_DANGER = "#EF4444"   # Red
-COLOR_ACCENT = "#8B5CF6"   # Violet (Jarvis)
-COLOR_TEXT = "#F8FAFC"     # Off-White Text
-COLOR_SUBTEXT = "#94A3B8"  # Muted Text
+# --- CACHED PHRASES (Zero Latency) ---
+AUDIO_CACHE = {
+    "wake": [
+        "Yes, sir?",
+        "I am here.",
+        "Online.",
+        "Ready."
+    ],
+    "fan_on": [
+        "Fan activated.",
+        "Cooling systems engaged.",
+        "Fan is ON."
+    ],
+    "fan_off": [
+        "Fan deactivated.",
+        "Powering down cooling.",
+        "Fan is OFF."
+    ],
+    "light_on": [
+        "Lights ON.",
+        "Illuminating."
+    ],
+    "light_off": [
+        "Lights OFF.",
+        "Going dark."
+    ],
+    "auto": [
+        "Auto mode engaged.",
+        "AI taking control."
+    ],
+    # --- INTERACTIVE PERSONALITY ---
+    "greeting": [
+        "Hello, sir. Systems operational.",
+        "Greetings.",
+        "Welcome back, sir."
+    ],
+    "thanks": [
+        "You are welcome, sir.",
+        "My pleasure.",
+        "Anytime."
+    ],
+    "identity": [
+        "I am Jarvis, your environmental control AI.",
+        "I am a Python-based intelligent assistant."
+    ]
+}
+
+# --- THEME COLORS ---
+COLOR_BG = "#0F172A"       
+COLOR_SIDEBAR = "#1E293B"  
+COLOR_CARD = "#334155"     
+COLOR_PRIMARY = "#3B82F6"  
+COLOR_SUCCESS = "#10B981"  
+COLOR_WARNING = "#F59E0B"  
+COLOR_DANGER = "#EF4444"   
+COLOR_ACCENT = "#8B5CF6"   
+COLOR_TEXT = "#F8FAFC"     
+COLOR_SUBTEXT = "#94A3B8"  
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("dark-blue") 
 
 class SmartHomeApp(ctk.CTk):
     def __init__(self):
+        """Initialize the EnviroControl (Jarvis Edition) dashboard application.
 
+        Responsibilities:
+        - Configure the main window (title, size, theme).
+        - Initialize runtime state used by:
+            - Serial I/O (Arduino gateway) + DB logging
+            - AI prediction + auto-control thresholding
+            - Voice recognition (wake word + command mode)
+            - Audio playback (cached phrases + dynamic TTS)
+        - Initialize audio subsystem (`pygame.mixer`).
+        - Build UI (sidebar + main area).
+        - Start background threads:
+            - `serial_loop`: reads serial, logs to SQLite, triggers AI control, updates UI.
+            - `unified_voice_loop`: microphone loop with WAKE/CMD modes.
+            - `preload_audio_cache`: pre-generates cached MP3 responses for low latency.
+
+        Notes:
+        - Threads are daemon threads so the app can exit cleanly.
+        - Cached audio files are stored under the local `cache/` directory.
+        """
         super().__init__()
 
         # Window Setup
-        self.title("EnviroControl AI | Ultimate Edition")
+        self.title("EnviroControl AI | JARVIS Edition")
         self.geometry("1400x900")
-        self.configure(fg_color=COLOR_BG) # Set main background
+        self.configure(fg_color=COLOR_BG) 
         
-        # Grid Layout
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
@@ -56,6 +125,12 @@ class SmartHomeApp(ctk.CTk):
         self.voice_mode = "WAKE" 
         self.running = True 
         self.latest_ai_pred = 0.0 
+        
+        # Audio Cache Storage
+        self.cached_files = {} 
+
+        # Initialize Audio
+        pygame.mixer.init()
 
         # Data Lists
         self.x_data = []    
@@ -67,268 +142,280 @@ class SmartHomeApp(ctk.CTk):
         self.setup_sidebar()
         self.setup_main_area()
 
-        # Start Threads
+        # Start Background Threads
         threading.Thread(target=self.serial_loop, daemon=True).start()
         threading.Thread(target=self.unified_voice_loop, daemon=True).start()
+        threading.Thread(target=self.preload_audio_cache, daemon=True).start()
 
     def setup_sidebar(self):
-        """Create and lay out the left sidebar UI.
+        """Build and lay out the left sidebar UI.
 
-        The sidebar contains:
-        - App title/logo area
+        The sidebar includes:
+        - App/logo title
         - Connection status indicator (offline/online)
-        - Current operating mode indicator (AI automatic vs voice override)
-        - Voice interface button + hint text for wake word
-        - Threshold display used by the AI control logic
-        - Export button to save DB rows to a CSV log file
+        - Current operating mode label (AI automatic vs voice override)
+        - Voice interface button + hint label
+        - AI threshold display
+        - Export button to save the database log to CSV
 
-        This method only constructs widgets and places them in the grid.
+        This method only creates and places widgets; it does not start threads.
         """
         self.sidebar = ctk.CTkFrame(self, width=280, corner_radius=0, fg_color=COLOR_SIDEBAR)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(8, weight=1) # Spacer at bottom
+        self.sidebar.grid_rowconfigure(8, weight=1) 
         
-        # 1. App Title / Logo Area
-        self.logo_label = ctk.CTkLabel(
-            self.sidebar, 
-            text="ENVIRO\nCONTROL AI", 
-            font=("Segoe UI", 28, "bold"), 
-            text_color=COLOR_PRIMARY
-        )
+        self.logo_label = ctk.CTkLabel(self.sidebar, text="JARVIS\nSYSTEMS", font=("Segoe UI", 28, "bold"), text_color=COLOR_PRIMARY)
         self.logo_label.grid(row=0, column=0, padx=20, pady=(50, 10))
         
-        # 2. Connection Status Pill
         self.status_frame = ctk.CTkFrame(self.sidebar, fg_color=COLOR_BG, corner_radius=20)
         self.status_frame.grid(row=1, column=0, padx=20, pady=(0, 30))
-        self.status_label = ctk.CTkLabel(
-            self.status_frame, 
-            text="● SYSTEM OFFLINE", 
-            font=("Segoe UI", 12, "bold"), 
-            text_color=COLOR_DANGER
-        )
+        self.status_label = ctk.CTkLabel(self.status_frame, text="● SYSTEM OFFLINE", font=("Segoe UI", 12, "bold"), text_color=COLOR_DANGER)
         self.status_label.pack(padx=15, pady=5)
 
-        # 3. Mode Section
         self.lbl_mode_title = ctk.CTkLabel(self.sidebar, text="OPERATING MODE", font=("Segoe UI", 12, "bold"), text_color=COLOR_SUBTEXT)
         self.lbl_mode_title.grid(row=2, column=0, padx=20, pady=(10, 0), sticky="w")
         
         self.mode_card = ctk.CTkFrame(self.sidebar, fg_color=COLOR_CARD, corner_radius=10)
         self.mode_card.grid(row=3, column=0, padx=20, pady=(5, 20), sticky="ew")
-        self.mode_label = ctk.CTkLabel(
-            self.mode_card, 
-            text="🤖 AI AUTOMATIC", 
-            font=("Segoe UI", 16, "bold"), 
-            text_color=COLOR_SUCCESS
-        )
+        self.mode_label = ctk.CTkLabel(self.mode_card, text="🤖 AI AUTOMATIC", font=("Segoe UI", 16, "bold"), text_color=COLOR_SUCCESS)
         self.mode_label.pack(pady=15)
 
-        # 4. Voice Command Section (The Big Button)
         self.lbl_voice_title = ctk.CTkLabel(self.sidebar, text="VOICE INTERFACE", font=("Segoe UI", 12, "bold"), text_color=COLOR_SUBTEXT)
         self.lbl_voice_title.grid(row=4, column=0, padx=20, pady=(10, 0), sticky="w")
 
-        self.btn_voice = ctk.CTkButton(
-            self.sidebar, 
-            text="🎙️ INITIALIZING...", 
-            command=self.force_wake, 
-            font=("Segoe UI", 16, "bold"),
-            fg_color=COLOR_ACCENT, 
-            hover_color="#7C3AED",
-            height=60,
-            corner_radius=12
-        )
+        self.btn_voice = ctk.CTkButton(self.sidebar, text="🎙️ INITIALIZING...", command=self.force_wake, font=("Segoe UI", 16, "bold"), fg_color=COLOR_ACCENT, hover_color="#7C3AED", height=60, corner_radius=12)
         self.btn_voice.grid(row=5, column=0, padx=20, pady=(10, 5), sticky="ew")
         
         self.lbl_voice_hint = ctk.CTkLabel(self.sidebar, text="Say 'Jarvis' to wake", font=("Segoe UI", 12), text_color=COLOR_SUBTEXT)
         self.lbl_voice_hint.grid(row=6, column=0, padx=20, pady=(0, 20))
 
-        # 5. Threshold Info
         self.lbl_thresh = ctk.CTkLabel(self.sidebar, text=f"AI TRIGGER: > {AI_THRESHOLD}°C", font=("Segoe UI", 14, "bold"), text_color=COLOR_SUBTEXT)
         self.lbl_thresh.grid(row=7, column=0, padx=20, pady=20)
 
-        # 6. Footer / Export
-        self.btn_export = ctk.CTkButton(
-            self.sidebar, 
-            text="💾 SAVE DATA LOG", 
-            command=self.export_csv, 
-            fg_color=COLOR_CARD, 
-            hover_color=COLOR_PRIMARY,
-            text_color="white",
-            height=40
-        )
+        self.btn_export = ctk.CTkButton(self.sidebar, text="💾 SAVE DATA LOG", command=self.export_csv, fg_color=COLOR_CARD, hover_color=COLOR_PRIMARY, text_color="white", height=40)
         self.btn_export.grid(row=9, column=0, padx=20, pady=30, sticky="ew")
 
     def setup_main_area(self):
-        """Create and lay out the main dashboard area (KPIs + charts).
+        """Build and lay out the main dashboard content area.
 
-        Builds:
-        - Four KPI “hero cards” (temperature, humidity, light level, AI prediction)
-        - A tabbed chart section with three Matplotlib plots embedded in Tk
+                Creates:
+                - Four KPI cards (temperature, humidity, light level, AI prediction)
+                - A tabbed chart area (Matplotlib embedded in Tk) with three trends:
+                    temperature, humidity, and light.
 
-        The charts are updated continuously via `update_dashboard`, which is scheduled
-        from the serial thread using `after(...)` to keep UI updates thread-safe.
+                The plots and KPI values are updated by `update_dashboard`, which is scheduled
+                from the serial thread using `after(...)` to keep UI updates thread-safe.
         """
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.main_frame.grid(row=0, column=1, padx=30, pady=30, sticky="nsew")
-        
-        # Grid Layout for Cards
         self.main_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
         self.main_frame.grid_rowconfigure(1, weight=1)
 
-        # --- HERO CARDS ---
-        # We create 4 cards for KPIs
         self.card_temp = self.create_hero_card(0, "TEMPERATURE", "00.0 °C", "🌡️", COLOR_DANGER) 
         self.card_hum = self.create_hero_card(1, "HUMIDITY", "00.0 %", "💧", COLOR_PRIMARY)     
         self.card_light = self.create_hero_card(2, "LIGHT LEVEL", "000", "☀️", COLOR_WARNING)   
         self.card_ai = self.create_hero_card(3, "AI PREDICTION", "--.- °C", "🧠", COLOR_ACCENT) 
 
-        # --- CHARTS AREA ---
-        # Styled TabView
-        self.tab_view = ctk.CTkTabview(
-            self.main_frame, 
-            fg_color=COLOR_SIDEBAR, 
-            segmented_button_fg_color=COLOR_BG,
-            segmented_button_selected_color=COLOR_PRIMARY,
-            segmented_button_selected_hover_color=COLOR_PRIMARY,
-            corner_radius=15,
-            height=500
-        )
+        self.tab_view = ctk.CTkTabview(self.main_frame, fg_color=COLOR_SIDEBAR, segmented_button_fg_color=COLOR_BG, segmented_button_selected_color=COLOR_PRIMARY, segmented_button_selected_hover_color=COLOR_PRIMARY, corner_radius=15, height=500)
         self.tab_view.grid(row=1, column=0, columnspan=4, padx=0, pady=30, sticky="nsew")
         
-        # Create Tabs
         self.ax_temp, self.canvas_temp = self.create_graph(self.tab_view.add("  TEMPERATURE TREND  "), COLOR_DANGER)
         self.ax_hum, self.canvas_hum = self.create_graph(self.tab_view.add("  HUMIDITY TREND  "), COLOR_PRIMARY)
         self.ax_light, self.canvas_light = self.create_graph(self.tab_view.add("  LIGHT TREND  "), COLOR_WARNING)
 
     def create_hero_card(self, col, title, value, icon, color):
-        """Create a KPI “hero card” widget and return its value label.
+        """Create one KPI “hero card” and return its value label.
 
         Args:
-            col: Grid column index within the main KPI row.
-            title: Label shown as the card title (e.g., TEMPERATURE).
-            value: Initial value text shown (e.g., "00.0 °C").
-            icon: Emoji/icon prefix displayed next to the title.
-            color: Text color used for the value.
+            col: Column index in the top KPI row.
+            title: Card title text (e.g., "TEMPERATURE").
+            value: Initial value text displayed on the card.
+            icon: Small icon/emoji displayed next to the title.
+            color: Text color for the value label.
 
         Returns:
-            The CTkLabel used to display the live-updating value, so callers can
-            later call `.configure(text=...)` when new data arrives.
+            The `CTkLabel` used to display the card's value so callers can update it
+            later via `.configure(text=...)`.
         """
         card = ctk.CTkFrame(self.main_frame, fg_color=COLOR_SIDEBAR, corner_radius=15)
         card.grid(row=0, column=col, padx=10, pady=0, sticky="ew")
-        
-        # Title Row
         title_lbl = ctk.CTkLabel(card, text=f"{icon}  {title}", font=("Segoe UI", 12, "bold"), text_color=COLOR_SUBTEXT)
         title_lbl.pack(pady=(20, 5), padx=20, anchor="w")
-        
-        # Value Row
         value_lbl = ctk.CTkLabel(card, text=value, font=("Segoe UI", 36, "bold"), text_color=color)
         value_lbl.pack(pady=(0, 20), padx=20, anchor="w")
-        
         return value_lbl
 
     def create_graph(self, parent, color):
-        """Create a themed Matplotlib plot embedded inside a Tk container.
+        """Create a themed Matplotlib graph embedded into a Tk widget.
 
         Args:
-            parent: The tab/frame widget that will host the graph canvas.
+            parent: The tab/frame container where the graph will be placed.
             color: Line color for the plotted series.
 
         Returns:
-            A tuple `(ax, canvas)` where:
-            - `ax` is the Matplotlib axes used for drawing
-            - `canvas` is the TkAgg canvas used to display the figure in the UI
+            `(ax, canvas)`:
+            - `ax`: Matplotlib axes used for drawing.
+            - `canvas`: TkAgg canvas widget used to render the figure.
 
         Notes:
-            The axes are styled to match the CustomTkinter dark theme.
+            The figure/axes styling is matched to the app's dark theme.
         """
         fig = Figure(figsize=(5, 3), dpi=100)
-        fig.patch.set_facecolor(COLOR_SIDEBAR) # Match Tab Background
-        
+        fig.patch.set_facecolor(COLOR_SIDEBAR) 
         ax = fig.add_subplot(111)
-        ax.set_facecolor(COLOR_SIDEBAR) # Match Plot Background
-        
-        # Style the axes
+        ax.set_facecolor(COLOR_SIDEBAR) 
         ax.tick_params(colors=COLOR_SUBTEXT, labelsize=9)
         ax.spines['bottom'].set_color(COLOR_SUBTEXT)
         ax.spines['left'].set_color(COLOR_SUBTEXT)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        
-        # Grid
         ax.grid(True, color=COLOR_CARD, linestyle='-', linewidth=1, alpha=0.5)
-        
-        # Initial Line
-        ax.plot([], [], color=color, linewidth=3, marker='o', markersize=0) # Thicker, cleaner line
-        
+        ax.plot([], [], color=color, linewidth=3, marker='o', markersize=0) 
         canvas = FigureCanvasTkAgg(fig, master=parent)
         canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
         return ax, canvas
 
-    # --- SPEECH ENGINE ---
-    def speak(self, text):
-        """Speak text using offline text-to-speech (TTS) and also print it.
+    # --- AUDIO CACHING SYSTEM (The Speed Fix) ---
+    def preload_audio_cache(self):
+        """Pre-generate and register cached MP3 phrases for low-latency responses.
 
         This method:
-        - Prints the assistant response to the console as `JARVIS: ...`
-        - Attempts to initialize `pyttsx3` and speak the given text aloud
+        - Ensures a local `cache/` directory exists.
+        - Iterates `AUDIO_CACHE` categories and phrases.
+        - Uses `edge_tts` to generate MP3 files (if they are missing).
+        - Populates `self.cached_files` with the filenames for each category.
+        - Plays a quick "wake" response once caching is complete.
 
-        Args:
-            text: The phrase to speak.
+        Threading/event loop:
+        - Creates its own asyncio event loop because it typically runs in a
+        background thread.
 
         Failure behavior:
-            If the TTS engine fails to initialize or speak, the error is printed
-            and the application continues running.
+        - Exceptions during individual file generation are swallowed so caching can
+        continue for other phrases.
+        """
+        if not os.path.exists("cache"):
+            os.makedirs("cache")
+
+        voice = "en-GB-RyanNeural"
+        print("--- CACHING AUDIO FILES ---")
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        for category, phrases in AUDIO_CACHE.items():
+            self.cached_files[category] = []
+            for i, text in enumerate(phrases):
+                filename = f"cache/{category}_{i}.mp3"
+                if not os.path.exists(filename):
+                    try:
+                        communicate = edge_tts.Communicate(text, voice)
+                        loop.run_until_complete(communicate.save(filename))
+                    except: pass
+                self.cached_files[category].append(filename)
+        
+        print("--- AUDIO CACHE COMPLETE ---")
+        self.speak_quick("wake") 
+
+    def speak_quick(self, category):
+        """Play a cached audio response for near-zero latency.
+
+        Args:
+            category: Key in `AUDIO_CACHE` / `self.cached_files` (e.g. "wake",
+                "fan_on", "greeting").
+
+        Behavior:
+        - Randomly selects a cached MP3 from the requested category.
+        - Plays it via `pygame.mixer.music`.
+        - Blocks until playback completes (keeps voice feedback crisp).
+
+        Failure behavior:
+        - Prints an error if playback fails.
+        """
+        try:
+            if category in self.cached_files and self.cached_files[category]:
+                file_to_play = random.choice(self.cached_files[category])
+                pygame.mixer.music.load(file_to_play)
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy():
+                    pygame.time.Clock().tick(10)
+        except Exception as e:
+            print(f"Quick Speak Error: {e}")
+
+    def speak(self, text):
+        """Generate dynamic speech audio (slower, but supports arbitrary text).
+
+        Use this when the response contains dynamic content (numbers, sensor values,
+        AI predictions) that cannot be fully pre-cached.
+
+        Args:
+            text: The text to speak.
+
+        Behavior:
+        - Generates an MP3 using `edge_tts` (neural voice) into a temporary file.
+        - Plays the file using `pygame`.
+        - Deletes the temporary file after playback.
+        - Runs the TTS generation/playback in a daemon thread to avoid freezing the UI.
+
+        Failure behavior:
+        - Prints a message if neural TTS fails.
         """
         print(f"JARVIS: {text}")
-        try:
-            engine = pyttsx3.init()
-            voices = engine.getProperty('voices')
-            for voice in voices:
-                if "David" in voice.name or "Male" in voice.name:
-                    engine.setProperty('voice', voice.id)
-                    break
-            engine.setProperty('rate', 170)
-            engine.say(text)
-            engine.runAndWait()
-        except Exception as e:
-            print(f"TTS Error: {e}")
+        def _speak_thread():
+            try:
+                voice = "en-GB-RyanNeural" 
+                output_file = f"temp_voice_{int(time.time())}.mp3"
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                communicate = edge_tts.Communicate(text, voice)
+                loop.run_until_complete(communicate.save(output_file))
+                
+                pygame.mixer.music.load(output_file)
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy():
+                    pygame.time.Clock().tick(10)
+                pygame.mixer.music.unload()
+                os.remove(output_file)
+            except Exception as e:
+                print(f"Neural Voice Error: {e}")
+        threading.Thread(target=_speak_thread, daemon=True).start()
 
-    # --- VOICE HELPER FUNCTIONS ---
+    # --- VOICE HELPERS ---
     def voice_status_report(self):
-        """Speak a short status report based on the latest buffered sensor values.
+        """Speak a short system status report using the latest buffered sensor data.
 
-        Reads the most recent temperature and humidity values from the in-memory
-        buffers (`self.y_temp`, `self.y_hum`) and speaks a human-friendly summary.
+        Reads the most recent values from `self.y_temp` and `self.y_hum`.
 
         Notes:
-            If no data has arrived yet (buffers empty), Jarvis reports that the
-            system is still initializing.
+        - Uses `self.speak(...)` (dynamic TTS) because the response includes numbers.
+        - If buffers are empty, reports that the system is still initializing.
         """
         try:
             if len(self.y_temp) > 0:
                 t = self.y_temp[-1]
                 h = self.y_hum[-1]
-                self.speak(f"Current temperature is {t} degrees. Humidity is {h} percent. All systems nominal.")
+                # Dynamic text -> Must use self.speak()
+                self.speak(f"Current temperature is {t} degrees. Humidity is {h} percent. Systems nominal.")
             else:
-                self.speak("System is initializing. Please wait.")
+                self.speak("System is initializing.")
         except:
-            self.speak("I cannot access sensor data right now.")
+            self.speak("Sensors unreachable.")
 
     def voice_explain_decision(self):
-        """Explain the current AI/override decision in natural language.
+        """Explain the current control decision (AI/override) in natural language.
 
         Behavior:
-        - If AI is disabled, explains that Manual Override is active.
-        - Otherwise, computes a simple “current heat index” estimate from the latest
-          buffered temperature/humidity, and compares it to `self.latest_ai_pred`.
-        - Speaks a rationale for why the fan is (or is not) expected to run.
+        - If AI is disabled, explains that Manual Override mode is active.
+        - Otherwise, computes a simplified “current heat index” estimate from the
+            latest temperature/humidity and compares it with `self.latest_ai_pred`.
+        - Speaks why the fan is expected to be on/off based on prediction/threshold.
 
         Failure behavior:
-            Falls back to a short response if data is missing or an exception occurs.
+        - Falls back to a short response if data is missing or an exception occurs.
         """
         try:
             if not self.ai_enabled:
-                self.speak("I am currently in Manual Override mode per your voice command.")
+                self.speak("I am in Manual Override mode.")
                 return
 
             if len(self.y_temp) > 0:
@@ -337,60 +424,58 @@ class SmartHomeApp(ctk.CTk):
                 current_hi = t + 0.55 * (1 - (h/100)) * (t - 14.4)
                 
                 if self.latest_ai_pred > AI_THRESHOLD:
-                    self.speak(f"The fan is ON. Although current heat index is {current_hi:.1f}, the AI predicts a rise to {self.latest_ai_pred:.1f}, which is unsafe.")
+                    self.speak(f"Fan is ON. Heat index is {current_hi:.1f}, but AI predicts {self.latest_ai_pred:.1f}, which is high.")
                 else:
-                    self.speak(f"The fan is OFF. The AI predicts a safe heat index of {self.latest_ai_pred:.1f}.")
+                    self.speak(f"Fan is OFF. AI predicts a safe {self.latest_ai_pred:.1f} degrees.")
             else:
-                self.speak("I am still gathering data.")
-                
-        except Exception as e:
-            print(f"Explain Error: {e}")
-            self.speak("I am calculating.")
+                self.speak("Gathering data.")
+        except:
+            self.speak("Calculating.")
             
     def voice_shutdown(self):
-        """Enter a shutdown mode: stop AI automation and send safe-off commands.
+        """Trigger an emergency shutdown state and send safe-off commands to hardware.
 
         This method:
-        - Speaks an emergency/shutdown message
-        - Sends serial commands to turn the fan OFF (`b'N'`) and lights OFF (`b'l'`)
-        - Disables AI control locally (`self.ai_enabled = False`)
-        - Updates UI labels/buttons to reflect shutdown state
+        - Speaks a shutdown message (dynamic TTS).
+        - Sends serial commands:
+            - `b'N'` to ensure the fan is OFF
+            - `b'l'` to ensure lights are OFF
+        - Disables AI mode locally.
+        - Updates the voice button UI to reflect shutdown state.
 
         Important:
-            This is a local UI + serial action; it does not terminate the process.
+        - This does not stop threads or exit the application; it changes operating mode.
         """
-        self.speak("Emergency protocol initiated. Shutting down.")
+        self.speak("Emergency shutdown.")
         self.ser.write(b'N') 
         time.sleep(0.5)
         self.ser.write(b'l') 
         self.ai_enabled = False 
         self.manual_override_status = "None"
-        self.btn_voice.configure(text="⚠️ SHUTDOWN MODE", fg_color=COLOR_CARD, text_color=COLOR_DANGER)
-        self.mode_label.configure(text="⚠️ SHUTDOWN", text_color=COLOR_DANGER)
+        self.btn_voice.configure(text="⚠️ SHUTDOWN", fg_color=COLOR_CARD, text_color=COLOR_DANGER)
 
     # --- UNIFIED VOICE LOOP ---
     def unified_voice_loop(self):
-        """Run the always-on voice assistant loop (wake word + command mode).
+        """Run the microphone loop implementing WAKE and COMMAND voice modes.
 
-        This is designed to be executed in a dedicated daemon thread. It owns the
-        microphone and implements a simple two-state voice mode machine:
+        Intended to run in its own daemon thread.
 
-        - `WAKE`: listens for the wake word “jarvis” (short timeout/phrase limit)
-        - `CMD`: listens for a command and executes actions, then returns to `WAKE`
+        Modes:
+        - WAKE: listens briefly for the wake word "jarvis".
+        - CMD: listens for a command and executes actions, then returns to WAKE.
 
-        Supported commands (simple keyword checks):
-        - Fan: "fan on", "fan off", "auto"/"reset"
-        - Lights: "light on", "light off" (sends `b'L'` / `b'l'` over serial)
-        - Info: "status"/"report", "why"/"reason"
-        - Safety: "shut down"/"goodbye" (calls `voice_shutdown`)
-
-        UI behavior:
-            Updates the sidebar voice button and hint label to show current state.
+        Commands handled (keyword-based):
+        - Interactive: "hello", "thank...", "who are you"
+        - Fan: "fan on", "fan off"
+        - Auto: "auto" / "reset"
+        - Light: "light on" / "light off" (serial `b'L'` / `b'l'`)
+        - Info: "status" / "report", "why" / "reason"
+        - Safety: "shut down" / "goodbye"
 
         Error handling:
-            - `WaitTimeoutError` returns the system to WAKE mode
-            - `UnknownValueError` is ignored (silence/noise)
-            - Other exceptions are printed and may break out to reinitialize mic
+        - `WaitTimeoutError`: returns to WAKE when in CMD mode.
+        - `UnknownValueError`: ignored (noise/unrecognized speech).
+        - Other exceptions: printed and cause the inner loop to restart.
         """
         time.sleep(3) 
         self.btn_voice.configure(text="🎙️ WAITING FOR 'JARVIS'", fg_color=COLOR_ACCENT)
@@ -400,11 +485,11 @@ class SmartHomeApp(ctk.CTk):
                 with sr.Microphone(device_index=1) as source:
                     self.recognizer.energy_threshold = 150  
                     self.recognizer.dynamic_energy_threshold = True 
-                    self.recognizer.pause_threshold = 0.6 
+                    self.recognizer.pause_threshold = 0.5 
                     
                     while self.running:
                         try:
-                            # --- MODE 1: WAKE ---
+                            # --- WAKE MODE ---
                             if self.voice_mode == "WAKE":
                                 self.btn_voice.configure(text="🎙️ WAITING FOR 'JARVIS'", fg_color=COLOR_ACCENT)
                                 self.lbl_voice_hint.configure(text="Say 'Jarvis' to wake", text_color=COLOR_SUBTEXT)
@@ -414,13 +499,13 @@ class SmartHomeApp(ctk.CTk):
                                 
                                 if "jarvis" in phrase:
                                     print("✅ JARVIS HEARD!")
-                                    self.speak("Yes?") 
+                                    self.speak_quick("wake") # Cached = Fast
                                     self.voice_mode = "CMD" 
                                     
-                            # --- MODE 2: COMMAND ---
+                            # --- COMMAND MODE ---
                             elif self.voice_mode == "CMD":
                                 self.btn_voice.configure(text="🔴 LISTENING...", fg_color=COLOR_DANGER)
-                                self.lbl_voice_hint.configure(text="Say: 'Status', 'Why', 'Fan On'...", text_color=COLOR_DANGER)
+                                self.lbl_voice_hint.configure(text="Say: 'Hello', 'Status', 'Fan On'...", text_color=COLOR_DANGER)
                                 
                                 audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=5)
                                 self.btn_voice.configure(text="⏳ PROCESSING...", fg_color=COLOR_WARNING)
@@ -428,35 +513,49 @@ class SmartHomeApp(ctk.CTk):
                                 command = self.recognizer.recognize_google(audio).lower()
                                 print(f"Command: {command}")
                                 
-                                if "on" in command and "fan" in command:
+                                # --- INTERACTIVE CHAT (RESTORED!) ---
+                                if "hello" in command:
+                                    self.speak_quick("greeting")
+                                    self.btn_voice.configure(text="💬 GREETING", fg_color=COLOR_PRIMARY)
+
+                                elif "thank" in command: # Matches "thank you", "thanks"
+                                    self.speak_quick("thanks")
+                                    self.btn_voice.configure(text="💬 POLITE", fg_color=COLOR_PRIMARY)
+
+                                elif "who are you" in command:
+                                    self.speak_quick("identity")
+                                    self.btn_voice.configure(text="💬 IDENTITY", fg_color=COLOR_PRIMARY)
+
+                                # --- HARDWARE COMMANDS ---
+                                elif "on" in command and "fan" in command:
                                     self.ai_enabled = False
                                     self.manual_override_status = "ON"
                                     self.mode_label.configure(text="⚡ VOICE OVERRIDE", text_color=COLOR_WARNING)
-                                    self.speak("Fan turned ON.")
+                                    self.speak_quick("fan_on")
                                     self.btn_voice.configure(text="✅ COMMAND EXECUTED", fg_color=COLOR_SUCCESS)
                                     
                                 elif "off" in command and "fan" in command:
                                     self.ai_enabled = True
                                     self.manual_override_status = "None"
                                     self.mode_label.configure(text="🤖 AI AUTOMATIC", text_color=COLOR_SUCCESS)
-                                    self.speak("Fan OFF. Returning to Auto Mode.")
+                                    self.speak_quick("fan_off")
                                     self.btn_voice.configure(text="✅ COMMAND EXECUTED", fg_color=COLOR_SUCCESS)
 
                                 elif "auto" in command or "reset" in command:
                                     self.ai_enabled = True
                                     self.manual_override_status = "None"
                                     self.mode_label.configure(text="🤖 AI AUTOMATIC", text_color=COLOR_SUCCESS)
-                                    self.speak("Auto Mode Engaged.")
+                                    self.speak_quick("auto")
                                     self.btn_voice.configure(text="✅ COMMAND EXECUTED", fg_color=COLOR_SUCCESS)
                                 
                                 elif "light" in command:
                                     if "on" in command:
                                         self.ser.write(b'L')
-                                        self.speak("Lights turned ON.")
+                                        self.speak_quick("light_on")
                                         self.btn_voice.configure(text="✅ LIGHTS ON", fg_color=COLOR_SUCCESS)
                                     elif "off" in command:
                                         self.ser.write(b'l')
-                                        self.speak("Lights turned OFF.")
+                                        self.speak_quick("light_off")
                                         self.btn_voice.configure(text="✅ LIGHTS OFF", fg_color=COLOR_SUCCESS)
 
                                 elif "status" in command or "report" in command:
@@ -471,8 +570,7 @@ class SmartHomeApp(ctk.CTk):
                                     self.voice_shutdown()
                                 
                                 else:
-                                    self.speak("I didn't catch that.")
-                                    self.btn_voice.configure(text="❓ UNKNOWN COMMAND", fg_color=COLOR_CARD)
+                                    self.btn_voice.configure(text="❓ UNKNOWN", fg_color=COLOR_CARD)
 
                                 time.sleep(1)
                                 self.voice_mode = "WAKE"
@@ -495,23 +593,22 @@ class SmartHomeApp(ctk.CTk):
     def force_wake(self):
         """Force the voice system into command-listening mode.
 
-        This is bound to the sidebar voice button so the user can manually trigger
-        command listening without speaking the wake word.
+        This is bound to the UI voice button so the user can manually trigger CMD mode
+        without speaking the wake word.
         """
         self.voice_mode = "CMD"
 
     def export_csv(self):
-        """Export the full `sensor_data` table to a timestamped CSV file.
+        """Export all rows from the `sensor_data` table into a timestamped CSV file.
 
-        Reads all rows from the SQLite database (`DB_NAME`) table `sensor_data` and
-        writes them into a new CSV file named like `sensor_log_HHMMSS.csv`.
+        Output file name format:
+            `sensor_log_HHMMSS.csv`
 
         UI behavior:
-            Temporarily changes the export button text/color to indicate success,
-            then restores it after a short delay.
+        - Temporarily changes the export button state to indicate success.
 
         Failure behavior:
-            Swallows exceptions (silent fail) to avoid interrupting the UI.
+        - Exceptions are swallowed to avoid interrupting the UI.
         """
         try:
             conn = sqlite3.connect(DB_NAME)
@@ -525,20 +622,18 @@ class SmartHomeApp(ctk.CTk):
         except: pass
 
     def run_ai_prediction(self):
-        """Train a simple model on recent history and forecast “feels like” heat index.
+        """Compute a heat-index-based forecast using a simple SVR model.
 
-        Pulls the latest 60 `(temp, humid)` samples from the DB and computes a heat
-        index-like value for each. Then fits a linear SVR model and forecasts a
-        future value.
+        Steps:
+        - Loads up to 60 recent `(temp, humid)` rows from SQLite.
+        - Converts them to a heat-index-like value per sample.
+        - Fits a linear SVR pipeline (`StandardScaler` + `SVR`).
+        - Predicts a future value (offset into the future) and returns a UI string.
 
         Returns:
-            A user-facing string for the UI card, e.g. `"27.8 °C (Feels Like)"`, or:
-            - `"GATHERING..."` if insufficient data
-            - `"Error"` if an exception occurs
-
-        Notes:
-            This function does not directly control actuators; `serial_loop` consumes
-            its numeric output to decide whether to send `b'P'`/`b'N'`.
+        - A formatted string like `"28.4 °C (Feels Like)"`
+        - `"GATHERING..."` if there is not enough history.
+        - `"Error"` on failure.
         """
         try:
             conn = sqlite3.connect(DB_NAME)
@@ -565,24 +660,24 @@ class SmartHomeApp(ctk.CTk):
         except: return "Error"
 
     def serial_loop(self):
-        """Continuously read sensor data from serial, log to DB, run AI, and control outputs.
+        """Read serial sensor data, log to SQLite, run AI logic, and update the UI.
 
-        This method is intended to run in a dedicated daemon thread.
+        Intended to run in a dedicated daemon thread.
 
         Responsibilities:
-        - Ensure the SQLite table `sensor_data` exists
-        - Open the serial port and update the connection status UI
-        - Read incoming lines formatted as `temp,humid,light`
-        - Insert readings into SQLite with a timestamp
-        - Compute an AI prediction string via `run_ai_prediction`
-        - If AI is enabled, parse the numeric prediction and send:
-          - `b'P'` if prediction > `AI_THRESHOLD`
-          - `b'N'` otherwise
-        - If AI is disabled and manual override is ON, force `b'P'`
-        - Schedule UI updates via `after(0, self.update_dashboard, ...)`
+        - Ensure the SQLite table exists.
+        - Connect to the configured serial port.
+        - Parse incoming lines formatted as CSV: `temp,humid,light`.
+        - Insert readings into SQLite with a timestamp.
+        - Call `run_ai_prediction` and (if AI is enabled) send control bytes:
+            - `b'P'` when prediction > `AI_THRESHOLD`
+            - `b'N'` otherwise
+        - When manual override is ON, force `b'P'`.
+        - Schedule UI updates via `self.after(0, self.update_dashboard, ...)`.
 
         Failure behavior:
-            Most exceptions are swallowed to keep the loop running.
+        - Most exceptions are swallowed to keep the loop running.
+        - If serial connection fails initially, the method returns.
         """
         conn = sqlite3.connect(DB_NAME)
         conn.execute('CREATE TABLE IF NOT EXISTS sensor_data (id INTEGER PRIMARY KEY, timestamp DATETIME, temp REAL, humid REAL, light INTEGER)')
@@ -626,21 +721,21 @@ class SmartHomeApp(ctk.CTk):
                 except: pass
 
     def update_dashboard(self, t, h, l, ai):
-        """Update UI labels, buffers, and plots with the latest sensor reading.
+        """Update KPI cards, buffer arrays, and refresh charts with the latest reading.
 
         Args:
-            t: Temperature reading (string or numeric) from serial.
-            h: Humidity reading (string or numeric) from serial.
-            l: Light reading (string or numeric) from serial.
-            ai: The AI prediction string returned by `run_ai_prediction`.
+            t: Temperature value (string or numeric).
+            h: Humidity value (string or numeric).
+            l: Light level value (string or numeric).
+            ai: AI prediction string for the KPI card.
 
         Behavior:
-        - Updates the four KPI cards
-        - Appends values to rolling buffers (up to 60 points)
-        - Triggers redraw of the three trend graphs
+        - Updates the top KPI labels.
+        - Appends the new values to rolling buffers (max 60 samples).
+        - Triggers redraw of the temperature/humidity/light graphs.
 
         Threading:
-            This is scheduled onto the Tk main thread via `after(...)`.
+        - Called on the Tk main thread (scheduled by `serial_loop` via `after`).
         """
         # Update Hero Cards
         self.card_temp.configure(text=f"{t} °C")
@@ -663,47 +758,36 @@ class SmartHomeApp(ctk.CTk):
         self.update_single_graph(self.ax_light, self.canvas_light, self.y_light, COLOR_WARNING)
 
     def update_single_graph(self, ax, canvas, y, c):
-        """Redraw a single trend graph using the current buffered x/y values.
+        """Redraw one Matplotlib trend graph using the current buffered data.
 
         Args:
-            ax: Matplotlib axes object to clear and redraw.
-            canvas: TkAgg canvas associated with the figure (used to render).
-            y: Y-axis data series (list of numbers).
-            c: Color for the line and fill.
+            ax: Matplotlib axes object to clear and re-draw.
+            canvas: TkAgg canvas used to render the figure.
+            y: The Y-series to plot.
+            c: Color for the line/fill.
 
         Behavior:
-        - Clears the axes and re-applies theme styling
-        - Plots a line + subtle fill for a “cyber” look
-        - Decimates x-axis ticks for readability
-        - Calls `canvas.draw()` to render the updated figure
+        - Clears axes and reapplies dark theme styling.
+        - Plots a line plus a subtle fill for readability.
+        - Decimates x-axis tick labels to avoid overcrowding.
+        - Calls `canvas.draw()` to render the update.
         """
         ax.clear()
-        ax.set_facecolor(COLOR_SIDEBAR) # Keep graph background blended
-        
-        # Add subtle grid
+        ax.set_facecolor(COLOR_SIDEBAR) 
         ax.grid(True, color=COLOR_CARD, linestyle='-', linewidth=1, alpha=0.3)
-        
-        # Plot Line
         ax.plot(range(len(self.x_data)), y, color=c, linewidth=2.5)
-        
-        # Fill area under line for "Cyber" look
         ax.fill_between(range(len(self.x_data)), y, color=c, alpha=0.1)
-
-        # Clean Spines
         ax.spines['bottom'].set_color(COLOR_SUBTEXT)
         ax.spines['left'].set_color(COLOR_SUBTEXT)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.tick_params(colors=COLOR_SUBTEXT)
-        
-        # Ticks (Decimate)
         step = 10
         if len(self.x_data) > step:
             idx = list(range(0, len(self.x_data), step))
             ax.set_xticks(idx); ax.set_xticklabels([self.x_data[i] for i in idx], rotation=0, ha='center', color=COLOR_SUBTEXT)
         else:
             ax.set_xticks(range(len(self.x_data))); ax.set_xticklabels(self.x_data, rotation=0, ha='center', color=COLOR_SUBTEXT)
-            
         canvas.draw()
 
 if __name__ == "__main__":

@@ -5,3 +5,5 @@ matplotlib==3.10.8
 scikit-learn==1.8.0
 SpeechRecognition==3.14.4
 PyAudio==0.2.14
+pygame
+edge-tts
