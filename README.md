@@ -39,16 +39,20 @@ Node B forwards that line to the laptop over USB serial.
 The dashboard (or voice control) sends a **single byte command** back over serial:
 
 - `P` = **Fan override ON** (fan forced ON)
-- `N` = **Fan auto** (Node A uses its local fan threshold logic; does not reset light overrides)
+- `N` = **Fan override OFF** (fan forced OFF)
 - `L` = **Lights ON** (voice override)
 - `l` = **Lights OFF** (voice override)
-- `A` = **Global reset** (fan auto + light auto)
+- `A` = **Global reset** (fan override OFF + light auto)
 
 Node B forwards the byte to Node A.
 
-In Node A auto mode, the current built-in thresholds are:
-- Fan auto ON if temperature > 27°C
-- Light auto ON if `light_adc < 500`
+Note (current behavior):
+- In the provided Node A sketch, the fan does **not** have a built-in temperature auto mode; it runs only when overridden by `P` and turns off with `N`/`A`.
+- The light has an auto mode when not overridden: ON if `light_adc < 500`.
+
+Dashboard fan logic (current):
+- Uses a “learned” temperature threshold (starts at 27°C) with a safety hysteresis band (0.5°C) to reduce rapid toggling.
+- Voice can nudge the threshold within 18°C–32°C using “hot/warm” (cooler) and “cold/freezing” (warmer).
 
 ### Database schema
 When you run the dashboard, it creates a local SQLite DB named `smart_home_data.db` with:
@@ -170,6 +174,7 @@ The dashboard continuously listens for the wake word **“Jarvis”**.
 After it wakes, supported commands include:
 - Scene modes: “study”, “cinema” / “movie”, “sleep” / “goodnight”
 - Fan: “fan on”, “fan off”, “auto”
+- Preference: “hot” / “warm” (lowers the learned temperature threshold), “cold” / “freezing” (raises the learned temperature threshold)
 - Lights: “light on/off” or “lamp on/off”
 - Info: “status”, “time” / “clock”
 - Chat: “hello”, “thanks”, “who (are you)”

@@ -60,13 +60,12 @@
     }
 
     // FAN LOGIC
-    if (fanOverride) { analogWrite(FAN_PIN, 255); } 
-    else {
-        if (t > 27.0) { analogWrite(FAN_PIN, 255); } 
-        else { analogWrite(FAN_PIN, 0); }
-    }
-
-    // LIGHT LOGIC
+    if (fanOverride) { 
+        analogWrite(FAN_PIN, 255); 
+      } else { 
+        analogWrite(FAN_PIN, 0); 
+      }
+        // LIGHT LOGIC
     if (lightState == 1) { digitalWrite(LIGHT_PIN, RELAY_ON); } 
     else if (lightState == 2) { digitalWrite(LIGHT_PIN, RELAY_OFF); } 
     else {
