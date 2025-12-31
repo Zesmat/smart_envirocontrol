@@ -4,7 +4,7 @@ A small “smart environment control” system:
 
 - **Node A (sensor + actuators)** reads temperature/humidity (DHT11) + LDR light, controls a fan + a light, and sends sensor data over serial.
 - **Node B (gateway)** bridges Node A <-> Laptop over USB serial.
-- **Python Dashboard** (`dashboard.py`) shows live graphs, stores readings in SQLite, runs a simple SVR model to forecast a **“feels like”** temperature (heat index), and supports **voice commands (“Jarvis”)** to control fan/lights and request system status.
+- **Python Dashboard** (`dashboard.py`) shows live cards + charts with timestamps, stores readings in SQLite, and supports **voice commands (“Jarvis”)** to control the fan/lights and trigger scene modes.
 
 ---
 
@@ -14,13 +14,14 @@ A small “smart environment control” system:
 - `check_db.py` — Utility to inspect the SQLite database schema and latest readings.
 - `arduino/sketchnodeA/sketchnodeA.ino` — Arduino sketch for Node A (sensors + fan/light control).
 - `arduino/sketchnodeB/sketchnodeB.ino` — Arduino sketch for Node B (serial gateway).
+- `cache/` — (Generated) cached MP3 files for fast TTS responses.
 
 ---
 
 ## System overview (data + control)
 
 ### Sensor data format
-Node A transmits one line per second in this exact format:
+Node A transmits one line every ~0.5s in this exact format:
 
 ```
 <temp_c>,<humidity_pct>,<light_adc>
@@ -34,20 +35,31 @@ Example:
 
 Node B forwards that line to the laptop over USB serial.
 
-### AI control commands
-The dashboard sends a **single byte command** back over serial:
+### Control commands (single-byte)
+The dashboard (or voice control) sends a **single byte command** back over serial:
 
-- `P` = **Proactive cooling ON** (AI override)
-- `N` = **Normal mode** (Node A uses local threshold logic)
+- `P` = **Fan override ON** (fan forced ON)
+- `N` = **Fan auto** (Node A uses its local fan threshold logic; does not reset light overrides)
 - `L` = **Lights ON** (voice override)
 - `l` = **Lights OFF** (voice override)
+- `A` = **Global reset** (fan auto + light auto)
 
 Node B forwards the byte to Node A.
+
+In Node A auto mode, the current built-in thresholds are:
+- Fan auto ON if temperature > 27°C
+- Light auto ON if `light_adc < 500`
 
 ### Database schema
 When you run the dashboard, it creates a local SQLite DB named `smart_home_data.db` with:
 
 - Table: `sensor_data(id, timestamp, temp, humid, light)`
+
+### Dashboard UI (current)
+- Hero cards: Temperature, Humidity, Light, Fan state
+- Insights strip: rolling averages over the last 60 samples
+- Tabbed charts: Temperature/Humidity/Light with live timestamp labels on the x-axis
+- Sidebar includes a “JARVIS FEED” showing last heard phrase + last action
 
 ---
 
@@ -100,7 +112,7 @@ Cross-connect the SoftwareSerial lines:
 Repeat for `sketchnodeB.ino` for **Node B**.
 
 ### Quick sanity check (built into Node A)
-On boot, Node A briefly turns **light ON** and **fan ON** for ~2 seconds, then turns them off. This is a wiring test.
+On boot, Node A briefly flashes the **light**. This is a wiring test.
 
 ---
 
@@ -127,11 +139,14 @@ python -m pip install -r requirements.txt
 
 Notes:
 - `sqlite3` is part of Python’s standard library (no install needed).
-- If `scikit-learn` install fails on your machine, upgrade pip first (above) and ensure you’re on a supported Python version.
+- If any installs fail on your machine, upgrade pip first (above) and ensure you’re on a supported Python version.
 - Voice commands in `dashboard.py` require `SpeechRecognition` and an audio backend (`PyAudio` is included in `requirements.txt`).
 - The dashboard uses `edge-tts` (neural TTS) and `pygame` for audio playback.
   - On first run, the app may generate and store cached MP3 files under `cache/` for instant responses.
   - Both Speech-to-Text (Google via SpeechRecognition) and Edge TTS typically require an internet connection.
+
+Microphone note:
+- `dashboard.py` currently uses a fixed microphone index (`device_index=1`). If voice recognition isn’t working, change the device index to match your system.
 
 ---
 
@@ -153,11 +168,12 @@ python dashboard.py
 The dashboard continuously listens for the wake word **“Jarvis”**.
 
 After it wakes, supported commands include:
-- Chat: “hello”, “thank you” / “thanks”, “who are you”
-- Fan: “turn on fan”, “turn off fan”, “auto” / “reset”
-- Lights: “lights on”, “lights off”
-- Info: “status” / “report”, “why” / “reason”
-- Safety: “shut down”, “goodbye”, “leave”
+- Scene modes: “study”, “cinema” / “movie”, “sleep” / “goodnight”
+- Fan: “fan on”, “fan off”, “auto”
+- Lights: “light on/off” or “lamp on/off”
+- Info: “status”, “time” / “clock”
+- Chat: “hello”, “thanks”, “who (are you)”
+- Safety: “shut down”
 
 What you should see:
 - Status in the sidebar should turn to **SYSTEM ONLINE** if serial connects.
@@ -168,10 +184,10 @@ What you should see:
 
 ## Exporting CSV
 
-In the dashboard, click **Export Data (CSV)**.
+In the dashboard, click **SAVE DATA**.
 
-- Output file name: `sensor_log_HHMMSS.csv`
-- Columns: `ID, Timestamp, Temp, Humid, Light`
+- Output file name: `log.csv`
+- Output rows: all rows from `sensor_data`
 
 ---
 
@@ -209,6 +225,10 @@ This prints:
 ### Fan or light doesn’t switch
 - Re-check driver hardware (transistor/MOSFET/relay) and power supply.
 - Note: Arduino pins cannot power motors/fans directly.
+
+### Voice doesn’t work
+- Check `device_index` in `dashboard.py` (microphone selection).
+- Ensure you have a working audio input device and internet connectivity for SpeechRecognition (Google) + Edge TTS.
 
 ---
 
