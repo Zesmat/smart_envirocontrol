@@ -60,6 +60,27 @@ ctk.set_default_color_theme("dark-blue")
 
 class SmartHomeApp(ctk.CTk):
     def __init__(self):
+        """Initialize the main application window and core runtime state.
+
+        This constructor is responsible for:
+            - Configuring the main CTk window (title, size, theme colors, grid).
+            - Initializing app-wide flags used by worker threads:
+                - `ai_enabled`: automatic fan control enabled/disabled.
+                - `manual_override_status`: indicates manual fan override intent.
+                - `voice_mode`: "WAKE" (wake word) vs "CMD" (command capture).
+                - `running`: global loop flag to stop threads on exit.
+            - Initializing “adaptive” control parameters:
+                - `current_threshold`: learned temperature setpoint used by the
+                  hysteresis controller in `serial_loop`.
+                - `hysteresis`: deadband to reduce frequent fan toggling.
+            - Initializing audio (pygame) and local TTS cache storage.
+            - Building the UI via `setup_sidebar` and `setup_main_area`.
+            - Starting background threads for serial I/O, voice, and TTS caching.
+
+        Threading notes:
+            Tkinter widgets should be updated on the UI thread. This app uses
+            `self.after(...)` for safe UI updates from background threads.
+        """
         super().__init__()
         self.title("EnviroControl AI | Adaptive Edition")
         self.geometry("1400x900")
@@ -95,6 +116,22 @@ class SmartHomeApp(ctk.CTk):
         threading.Thread(target=self.preload_audio_cache, daemon=True).start()
 
     def setup_sidebar(self):
+        """Create the left sidebar (status, mode, voice, threshold, export).
+
+        Sidebar sections:
+            - Branding header
+            - System status pill (offline/online)
+            - Operating mode card
+            - Voice interface button (manual wake)
+            - JARVIS FEED (last heard + last action)
+            - Learned threshold display
+            - CSV export button
+
+        Side effects:
+            Defines widget attributes used later for live updates:
+                - `status_label`, `mode_label`, `btn_voice`
+                - `lbl_heard`, `lbl_action`, `lbl_threshold`
+        """
         self.sidebar = ctk.CTkFrame(self, width=280, corner_radius=0, fg_color=COLOR_SIDEBAR)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self.sidebar.grid_rowconfigure(10, weight=1) 
@@ -134,6 +171,16 @@ class SmartHomeApp(ctk.CTk):
         self.btn_export.grid(row=11, column=0, padx=20, pady=30, sticky="ew")
 
     def update_jarvis_feed(self, heard=None, action=None):
+        """Update the sidebar JARVIS FEED labels in a thread-safe way.
+
+        Args:
+            heard: Optional phrase text to show as the last recognized speech.
+            action: Optional action text describing what the system just did.
+
+        Threading:
+            Safe to call from any thread. Updates are scheduled onto the Tk
+            event loop using `self.after(0, ...)`.
+        """
         def _do():
             if heard is not None:
                 if hasattr(self, "lbl_heard"): self.lbl_heard.configure(text=f"Heard: {heard}")
@@ -143,6 +190,19 @@ class SmartHomeApp(ctk.CTk):
         except: pass
 
     def safe_ser_write(self, data: bytes):
+        """Safely write a command byte to the Arduino serial port.
+
+        Args:
+            data: Raw bytes to send (expected one of `b'P'`, `b'N'`, `b'L'`,
+                `b'l'`, `b'A'`).
+
+        Returns:
+            bool: True if the write was attempted successfully, else False.
+
+        Notes:
+            This is best-effort and intentionally swallows exceptions so voice
+            and UI flows don't crash when serial isn't connected.
+        """
         try:
             if hasattr(self, "ser") and self.ser is not None:
                 self.ser.write(data)
@@ -151,6 +211,19 @@ class SmartHomeApp(ctk.CTk):
         return False
 
     def setup_main_area(self):
+        """Create and lay out the main dashboard area.
+
+        Builds:
+            - Hero cards row (Temp, Humidity, Light, Fan state)
+            - Insights strip (rolling averages + system meta)
+            - Tabbed charts (Temperature/Humidity/Light)
+
+        Side effects:
+            Creates widget attributes updated by `update_dashboard`:
+                - `card_temp`, `card_hum`, `card_light`, `card_fan`
+                - `mini_*` labels/bars, `lbl_last_update`, `lbl_points`
+                - `ax_*`, `canvas_*`
+        """
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.main_frame.grid(row=0, column=1, padx=30, pady=30, sticky="nsew")
         self.main_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
@@ -185,6 +258,18 @@ class SmartHomeApp(ctk.CTk):
         self.ax_light, self.canvas_light = self.create_graph(self.tab_view.add(" LIGHT "), COLOR_WARNING)
 
     def create_hero_card(self, col, title, value, icon, color):
+        """Create a hero metric card (large value + label).
+
+        Args:
+            col: Column index in the hero row.
+            title: Metric title.
+            value: Initial value text.
+            icon: Emoji/icon prefix.
+            color: Value label color.
+
+        Returns:
+            CTkLabel for the value field, which callers update later.
+        """
         card = ctk.CTkFrame(self.main_frame, fg_color=COLOR_SIDEBAR, corner_radius=15)
         card.grid(row=0, column=col, padx=10, pady=0, sticky="ew")
         ctk.CTkLabel(card, text=f"{icon} {title}", font=("Segoe UI", 12, "bold"), text_color=COLOR_SUBTEXT).pack(pady=(20, 5), padx=20, anchor="w")
@@ -193,6 +278,18 @@ class SmartHomeApp(ctk.CTk):
         return lbl
 
     def create_mini_stat(self, parent, col, title, icon, color):
+        """Create a compact insight tile with a numeric label and progress bar.
+
+        Args:
+            parent: The frame that will contain the tile.
+            col: Grid column index within the parent.
+            title: Title text.
+            icon: Emoji/icon prefix.
+            color: Color for value label + bar.
+
+        Returns:
+            (value_label, progress_bar) so the caller can update both.
+        """
         card = ctk.CTkFrame(parent, fg_color=COLOR_BG, corner_radius=12)
         card.grid(row=0, column=col, padx=10, pady=10, sticky="nsew")
         ctk.CTkLabel(card, text=f"{icon} {title}", font=("Segoe UI", 12, "bold"), text_color=COLOR_SUBTEXT).pack(pady=(14, 2), padx=16, anchor="w")
@@ -204,6 +301,15 @@ class SmartHomeApp(ctk.CTk):
         return value_lbl, bar
 
     def create_graph(self, parent, color):
+        """Create a Matplotlib graph embedded in a CustomTkinter tab.
+
+        Args:
+            parent: Tab/frame to host the graph widget.
+            color: Series line color.
+
+        Returns:
+            Tuple (ax, canvas) used by `update_single_graph` to redraw.
+        """
         fig = Figure(figsize=(5, 3), dpi=100)
         fig.patch.set_facecolor(COLOR_SIDEBAR) 
         ax = fig.add_subplot(111)
@@ -218,6 +324,18 @@ class SmartHomeApp(ctk.CTk):
         return ax, canvas
 
     def preload_audio_cache(self):
+        """Preload TTS audio responses into local MP3 files.
+
+        This converts each phrase in `AUDIO_CACHE` to an MP3 using `edge_tts`
+        and stores the result under the `cache/` directory.
+
+        Side effects:
+            - Creates `cache/` folder if missing.
+            - Populates `self.cached_files[category]` with MP3 paths.
+
+        Threading:
+            Intended to run as a daemon thread.
+        """
         if not os.path.exists("cache"): os.makedirs("cache")
         voice = "en-GB-RyanNeural"
         print("--- CACHING ALFRED ---")
@@ -236,6 +354,14 @@ class SmartHomeApp(ctk.CTk):
         self.speak_quick("wake") 
 
     def speak_quick(self, category):
+        """Play a random cached response for a given category.
+
+        Args:
+            category: Category name in `self.cached_files`.
+
+        Notes:
+            - Best-effort: playback failures are silently ignored.
+        """
         try:
             if category in self.cached_files:
                 pygame.mixer.music.load(random.choice(self.cached_files[category]))
@@ -243,6 +369,17 @@ class SmartHomeApp(ctk.CTk):
         except: pass
 
     def speak(self, text):
+        """Synthesize and speak a custom sentence (non-cached).
+
+        Args:
+            text: Text to synthesize using `edge_tts`.
+
+        Threading:
+            Runs synthesis/playback on a daemon thread to keep the UI responsive.
+
+        Side effects:
+            Creates a temporary `temp.mp3` file and deletes it after playback.
+        """
         def _speak():
             try:
                 loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
@@ -255,10 +392,41 @@ class SmartHomeApp(ctk.CTk):
         threading.Thread(target=_speak, daemon=True).start()
 
     def update_threshold_ui(self):
+        """Update the sidebar threshold label from `self.current_threshold`."""
         self.lbl_threshold.configure(text=f"{self.current_threshold:.1f} °C")
 
     # --- VOICE LOOP (VALIDATED + ADAPTIVE) ---
     def unified_voice_loop(self):
+        """Continuously listen for wake word and handle voice commands.
+
+        Modes:
+            - WAKE: listens briefly for the word "jarvis".
+            - CMD: listens longer and parses a command.
+
+        Command handling (current implementation):
+            - Preference adjustment:
+                - "hot"/"warm": decrease threshold (cooler target)
+                - "cold"/"freezing": increase threshold (warmer target)
+            - Scene presets:
+                - study: lights on + threshold set to 24°C
+                - cinema/movie: lights off + fan on (manual override)
+                - sleep: lights off + threshold set to 26°C
+            - Direct control:
+                - fan on/off, auto
+                - light/lamp on/off
+            - Info:
+                - status
+            - Safety:
+                - shut down
+
+        Threading:
+            Runs in a daemon thread. UI updates are performed indirectly via
+            `update_jarvis_feed` and widget configuration calls.
+
+        Reliability:
+            The loop uses broad exception handling to stay alive even if the
+            microphone or recognition service intermittently fails.
+        """
         time.sleep(3) 
         while self.running:
             try:
@@ -413,9 +581,26 @@ class SmartHomeApp(ctk.CTk):
                         except: pass
             except: time.sleep(1)
 
-    def force_wake(self): self.voice_mode = "CMD"
+    def force_wake(self):
+        """Manually switch the voice system into command mode.
+
+        This is triggered by the sidebar voice button. It allows issuing a
+        command without speaking the wake word.
+        """
+        self.voice_mode = "CMD"
 
     def export_csv(self):
+        """Export the full `sensor_data` table to a CSV file.
+
+        Output:
+            - Writes `log.csv` to the current working directory.
+
+        Data source:
+            - Reads all rows from the SQLite database `smart_home_data.db`.
+
+        Failure handling:
+            Best-effort: any exception is swallowed to avoid UI disruption.
+        """
         try:
             conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
             cursor.execute("SELECT * FROM sensor_data")
@@ -425,6 +610,22 @@ class SmartHomeApp(ctk.CTk):
 
     # --- SERIAL LOOP WITH HYSTERESIS & ADAPTIVE LOGIC ---
     def serial_loop(self):
+        """Continuously read serial telemetry, log it to SQLite, and update UI.
+
+        Responsibilities:
+            - Ensure the `sensor_data` table exists.
+            - Connect to the configured serial port (`SERIAL_PORT`).
+            - Parse incoming lines as CSV: temp, humid, light.
+            - Persist readings to SQLite with a timestamp.
+            - Update connection status indicator.
+            - Apply fan control:
+                - In AI mode: hysteresis control around `current_threshold`.
+                - In manual override: can force fan ON.
+            - Schedule UI refresh using `self.after(0, ...)`.
+
+        Threading:
+            Runs in a daemon thread.
+        """
         conn = sqlite3.connect(DB_NAME)
         conn.execute('CREATE TABLE IF NOT EXISTS sensor_data (id INTEGER PRIMARY KEY, timestamp DATETIME, temp REAL, humid REAL, light INTEGER)')
         conn.close()
@@ -462,6 +663,20 @@ class SmartHomeApp(ctk.CTk):
                 except: pass
 
     def update_dashboard(self, t, h, l):
+        """Update all dashboard widgets with new sensor readings.
+
+        Args:
+            t: Temperature value (string or numeric).
+            h: Humidity value (string or numeric).
+            l: Light sensor reading (string or numeric).
+
+        Side effects:
+            - Updates hero card labels.
+            - Updates fan status label based on mode/override.
+            - Appends to chart buffers (keeps last 60 points).
+            - Updates insight averages and progress bars.
+            - Redraws all charts.
+        """
         self.card_temp.configure(text=f"{t} °C")
         self.card_hum.configure(text=f"{h} %")
         self.card_light.configure(text=f"{l}")
@@ -504,6 +719,19 @@ class SmartHomeApp(ctk.CTk):
         self.update_single_graph(self.ax_light, self.canvas_light, self.y_light, COLOR_WARNING)
 
     def update_single_graph(self, ax, canvas, y, c):
+        """Redraw one chart with downsampled timestamp labels.
+
+        Args:
+            ax: Matplotlib Axes to draw into.
+            canvas: FigureCanvasTkAgg to redraw.
+            y: Sequence of y-values.
+            c: Line color.
+
+        Chart details:
+            - X values are indices into the ring buffer.
+            - Tick labels are taken from `self.x_data` and reduced to ~8 ticks
+              to keep the chart readable.
+        """
         ax.clear(); ax.set_facecolor(COLOR_SIDEBAR)
         ax.grid(True, color=COLOR_CARD, linestyle='-', linewidth=1, alpha=0.3)
         n = len(self.x_data)
